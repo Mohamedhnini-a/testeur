@@ -1,144 +1,621 @@
-name: Check and Update Working Configs
+import concurrent.futures
+import json
+import os
+import re
+import socket
+import subprocess
+import tempfile
+import time
+from urllib.parse import parse_qs, unquote, urlparse
 
-on:
-  workflow_dispatch:
-
-  schedule:
-    # مرة كل 24 ساعة - 00:00 UTC
-    - cron: "0 0 * * *"
-
-permissions:
-  contents: write
-
-jobs:
-  check:
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-
-    steps:
-
-      # ==========================================
-      # Checkout repository
-      # ==========================================
-
-      - name: Checkout
-        uses: actions/checkout@v5
+import requests
 
 
-      # ==========================================
-      # Setup Python
-      # ==========================================
+SOURCE_URL = "https://orange-mountain-1d16.hninisiimoo.workers.dev/"
 
-      - name: Setup Python
-        uses: actions/setup-python@v6
-        with:
-          python-version: "3.12"
+XRAY = "./xray/xray"
 
+TEST_URL = "https://www.google.com/generate_204"
 
-      # ==========================================
-      # Install dependencies
-      # ==========================================
+TIMEOUT = 8
+XRAY_START_WAIT = 0.8
 
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install requests
+MAX_WORKERS = 8
+
+BASE_PORT = 20000
 
 
-      # ==========================================
-      # Download Xray
-      # ==========================================
+# ============================================================
+# Download configs
+# ============================================================
 
-      - name: Download Xray
-        run: |
+def download_configs():
+    response = requests.get(
+        SOURCE_URL,
+        timeout=20,
+    )
 
-          XRAY_VERSION="v26.7.28"
+    response.raise_for_status()
 
-          wget -q \
-            "https://github.com/XTLS/Xray-core/releases/download/${XRAY_VERSION}/Xray-linux-64.zip" \
-            -O xray.zip
-
-          unzip -q xray.zip -d xray
-
-          chmod +x xray/xray
-
-          ./xray/xray version
-
-
-      # ==========================================
-      # Run checker
-      # ==========================================
-
-      - name: Check configs
-        run: |
-          python checker.py
+    return [
+        line.strip()
+        for line in response.text.splitlines()
+        if line.strip()
+    ]
 
 
-      # ==========================================
-      # Rename result
-      # ==========================================
+# ============================================================
+# Parse VLESS / Trojan
+# ============================================================
 
-      - name: Prepare working_configs.txt
-        run: |
-          if [ -f working.txt ]; then
-            mv working.txt working_configs.txt
-          else
-            touch working_configs.txt
-          fi
+def parse_config(line):
+
+    if not (
+        line.startswith("vless://")
+        or line.startswith("trojan://")
+    ):
+        return None
+
+    try:
+        parsed = urlparse(line)
+
+        protocol = parsed.scheme.lower()
+
+        if protocol not in ("vless", "trojan"):
+            return None
+
+        host = parsed.hostname
+        port = parsed.port
+
+        if not host:
+            return None
+
+        if port != 443:
+            return None
+
+        params = parse_qs(
+            parsed.query,
+            keep_blank_values=True,
+        )
+
+        def get(name):
+            values = params.get(name)
+
+            if not values:
+                return ""
+
+            return values[0]
+
+        network = get("type")
+        security = get("security")
+
+        ws_host = get("host")
+        sni = get("sni")
+
+        path = unquote(
+            get("path")
+        )
+
+        # ====================================================
+        # Required transport
+        # ====================================================
+
+        if network != "ws":
+            return None
+
+        if security != "tls":
+            return None
+
+        if not path:
+            path = "/"
+
+        # Host fallback
+        if not ws_host:
+            ws_host = host
+
+        # SNI fallback
+        if not sni:
+            sni = ws_host
+
+        # ====================================================
+        # VLESS
+        # ====================================================
+
+        if protocol == "vless":
+
+            uuid = parsed.username
+
+            if not uuid:
+                return None
+
+            return {
+                "protocol": "vless",
+                "server": host,
+                "port": 443,
+                "uuid": uuid,
+                "host": ws_host,
+                "sni": sni,
+                "path": path,
+                "original": line,
+            }
+
+        # ====================================================
+        # Trojan
+        # ====================================================
+
+        if protocol == "trojan":
+
+            password = parsed.username
+
+            if not password:
+                return None
+
+            return {
+                "protocol": "trojan",
+                "server": host,
+                "port": 443,
+                "password": password,
+                "host": ws_host,
+                "sni": sni,
+                "path": path,
+                "original": line,
+            }
+
+    except Exception:
+        return None
+
+    return None
 
 
-      # ==========================================
-      # Show result
-      # ==========================================
+# ============================================================
+# Create Xray configuration
+# ============================================================
 
-      - name: Show result
-        run: |
-          echo "=============================="
-          echo " WORKING CONFIGS"
-          echo "=============================="
+def make_xray_config(config, local_port):
 
-          wc -l working_configs.txt
+    if config["protocol"] == "vless":
 
-          echo
-          echo "First configs:"
-          head -n 10 working_configs.txt
+        outbound = {
+            "protocol": "vless",
+
+            "settings": {
+                "vnext": [
+                    {
+                        "address": config["server"],
+                        "port": 443,
+
+                        "users": [
+                            {
+                                "id": config["uuid"],
+                                "encryption": "none",
+                            }
+                        ],
+                    }
+                ]
+            },
+
+            "streamSettings": {
+                "network": "ws",
+
+                "security": "tls",
+
+                "tlsSettings": {
+                    "serverName": config["sni"],
+                    "allowInsecure": False,
+                },
+
+                "wsSettings": {
+                    "path": config["path"],
+
+                    "headers": {
+                        "Host": config["host"],
+                    },
+                },
+            },
+        }
+
+    else:
+
+        outbound = {
+            "protocol": "trojan",
+
+            "settings": {
+                "servers": [
+                    {
+                        "address": config["server"],
+                        "port": 443,
+                        "password": config["password"],
+                    }
+                ]
+            },
+
+            "streamSettings": {
+                "network": "ws",
+
+                "security": "tls",
+
+                "tlsSettings": {
+                    "serverName": config["sni"],
+                    "allowInsecure": False,
+                },
+
+                "wsSettings": {
+                    "path": config["path"],
+
+                    "headers": {
+                        "Host": config["host"],
+                    },
+                },
+            },
+        }
+
+    return {
+        "log": {
+            "loglevel": "error"
+        },
+
+        "inbounds": [
+            {
+                "listen": "127.0.0.1",
+
+                "port": local_port,
+
+                "protocol": "http",
+
+                "settings": {}
+            }
+        ],
+
+        "outbounds": [
+            outbound
+        ]
+    }
 
 
-      # ==========================================
-      # Commit and push
-      # ==========================================
+# ============================================================
+# Check one config
+# ============================================================
 
-      - name: Update repository
-        run: |
+def test_config(item):
 
-          git config user.name "github-actions[bot]"
+    index, config = item
 
-          git config user.email \
-            "41898282+github-actions[bot]@users.noreply.github.com"
+    local_port = BASE_PORT + index
 
-          git add working_configs.txt
+    config_file = None
+    process = None
 
-          if git diff --cached --quiet; then
+    try:
 
-            echo "No changes in working_configs.txt"
+        xray_config = make_xray_config(
+            config,
+            local_port,
+        )
 
-          else
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            suffix=".json",
+            delete=False,
+            encoding="utf-8",
+        ) as file:
 
-            git commit \
-              -m "Update working configs"
+            json.dump(
+                xray_config,
+                file,
+                ensure_ascii=False,
+            )
 
-            git push
+            config_file = file.name
 
-          fi
+        # ====================================================
+        # Start Xray
+        # ====================================================
+
+        process = subprocess.Popen(
+            [
+                XRAY,
+                "run",
+                "-c",
+                config_file,
+            ],
+
+            stdout=subprocess.DEVNULL,
+
+            stderr=subprocess.DEVNULL,
+        )
+
+        # ====================================================
+        # Wait for local proxy
+        # ====================================================
+
+        started = False
+
+        for _ in range(10):
+
+            if process.poll() is not None:
+                break
+
+            try:
+
+                sock = socket.create_connection(
+                    ("127.0.0.1", local_port),
+                    timeout=0.2,
+                )
+
+                sock.close()
+
+                started = True
+
+                break
+
+            except OSError:
+                time.sleep(0.1)
+
+        if not started:
+
+            return {
+                "index": index,
+                "ok": False,
+                "line": config["original"],
+            }
+
+        # ====================================================
+        # Real request through Xray
+        # ====================================================
+
+        proxies = {
+            "http":
+                f"http://127.0.0.1:{local_port}",
+
+            "https":
+                f"http://127.0.0.1:{local_port}",
+        }
+
+        start = time.perf_counter()
+
+        response = requests.get(
+            TEST_URL,
+
+            proxies=proxies,
+
+            timeout=TIMEOUT,
+
+            allow_redirects=False,
+        )
+
+        elapsed = int(
+            (time.perf_counter() - start) * 1000
+        )
+
+        # generate_204 should return 204
+        ok = response.status_code in (
+            200,
+            204,
+        )
+
+        if ok:
+
+            print(
+                f"[ONLINE] "
+                f"{elapsed} ms | "
+                f"{config['protocol']} | "
+                f"{config['server']}"
+            )
+
+        else:
+
+            print(
+                f"[FAILED] "
+                f"HTTP {response.status_code} | "
+                f"{config['server']}"
+            )
+
+        return {
+            "index": index,
+            "ok": ok,
+            "line": config["original"],
+        }
+
+    except Exception as error:
+
+        print(
+            f"[FAILED] "
+            f"{config.get('protocol', '?')} | "
+            f"{config.get('server', '?')} | "
+            f"{str(error)[:100]}"
+        )
+
+        return {
+            "index": index,
+            "ok": False,
+            "line": config["original"],
+        }
+
+    finally:
+
+        # ====================================================
+        # Stop Xray
+        # ====================================================
+
+        if process:
+
+            try:
+                process.terminate()
+
+                process.wait(
+                    timeout=1
+                )
+
+            except Exception:
+
+                try:
+                    process.kill()
+                except Exception:
+                    pass
+
+        # ====================================================
+        # Delete temporary config
+        # ====================================================
+
+        if config_file:
+
+            try:
+                os.remove(
+                    config_file
+                )
+
+            except Exception:
+                pass
 
 
-      # ==========================================
-      # Upload artifact
-      # ==========================================
+# ============================================================
+# Main
+# ============================================================
 
-      - name: Upload working configs
-        uses: actions/upload-artifact@v5
-        with:
-          name: working-configs
-          path: working_configs.txt
-          if-no-files-found: error
+def main():
+
+    print()
+    print("==============================")
+    print(" VLESS / TROJAN CHECKER")
+    print("==============================")
+    print()
+
+    print("Downloading configs...")
+
+    lines = download_configs()
+
+    print(
+        f"Downloaded: {len(lines)} lines"
+    )
+
+    # ========================================================
+    # Parse
+    # ========================================================
+
+    configs = []
+
+    for line in lines:
+
+        config = parse_config(line)
+
+        if config:
+
+            configs.append(config)
+
+    print(
+        f"Testable configs: {len(configs)}"
+    )
+
+    print()
+
+    if not configs:
+
+        print(
+            "No VLESS/Trojan WS TLS 443 configs found."
+        )
+
+        open(
+            "working.txt",
+            "w",
+            encoding="utf-8",
+        ).close()
+
+        return
+
+    # ========================================================
+    # Parallel testing
+    # ========================================================
+
+    items = list(
+        enumerate(
+            configs,
+            start=1,
+        )
+    )
+
+    results = []
+
+    with concurrent.futures.ThreadPoolExecutor(
+        max_workers=MAX_WORKERS
+    ) as executor:
+
+        futures = [
+            executor.submit(
+                test_config,
+                item,
+            )
+            for item in items
+        ]
+
+        for future in concurrent.futures.as_completed(
+            futures
+        ):
+
+            result = future.result()
+
+            results.append(result)
+
+    # ========================================================
+    # Keep original order
+    # ========================================================
+
+    results.sort(
+        key=lambda x: x["index"]
+    )
+
+    working = [
+        result["line"]
+        for result in results
+        if result["ok"]
+    ]
+
+    # ========================================================
+    # Save working configs
+    # ========================================================
+
+    with open(
+        "working.txt",
+        "w",
+        encoding="utf-8",
+    ) as file:
+
+        for line in working:
+
+            file.write(
+                line + "\n"
+            )
+
+    # ========================================================
+    # Summary
+    # ========================================================
+
+    print()
+    print("==============================")
+    print(" CHECK FINISHED")
+    print("==============================")
+
+    print(
+        f"Total downloaded : {len(lines)}"
+    )
+
+    print(
+        f"Tested           : {len(configs)}"
+    )
+
+    print(
+        f"Working          : {len(working)}"
+    )
+
+    print(
+        f"Failed           : "
+        f"{len(configs) - len(working)}"
+    )
+
+    print()
+    print(
+        "Output: working.txt"
+    )
+
+
+if __name__ == "__main__":
+    main()
