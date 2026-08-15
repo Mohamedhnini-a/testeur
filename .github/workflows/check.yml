@@ -1,4 +1,4 @@
-name: Check VLESS Trojan Configs
+name: Check Working Configs
 
 on:
   workflow_dispatch:
@@ -6,24 +6,46 @@ on:
 jobs:
   check:
     runs-on: ubuntu-latest
+
     timeout-minutes: 30
 
     steps:
+
+      # ==========================================
+      # Checkout repository
+      # ==========================================
+
       - name: Checkout
         uses: actions/checkout@v4
+
+
+      # ==========================================
+      # Python
+      # ==========================================
 
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
+
+      # ==========================================
+      # Install dependencies
+      # ==========================================
+
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install requests
 
+
+      # ==========================================
+      # Download Xray
+      # ==========================================
+
       - name: Download Xray
         run: |
+
           XRAY_VERSION="v26.7.28"
 
           wget -q \
@@ -31,16 +53,28 @@ jobs:
             -O xray.zip
 
           unzip -q xray.zip -d xray
+
           chmod +x xray/xray
 
           ./xray/xray version
 
-      - name: Run checker
+
+      # ==========================================
+      # Run checker
+      # ==========================================
+
+      - name: Check configs
         run: |
           python checker.py
+
+
+      # ==========================================
+      # Upload working configs
+      # ==========================================
 
       - name: Upload working configs
         uses: actions/upload-artifact@v4
         with:
           name: working-configs
           path: working.txt
+          if-no-files-found: error
