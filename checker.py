@@ -1,33 +1,52 @@
-import subprocess
-import tempfile
-import requests
+import concurrent.futures
 import json
 import os
-import time
+import re
 import socket
-from urllib.parse import urlparse, parse_qs, unquote
+import subprocess
+import tempfile
+import time
+from urllib.parse import parse_qs, unquote, urlparse
+
+import requests
 
 
-SOURCE_URL = (
-    "https://orange-mountain-1d16.hninisiimoo.workers.dev/"
-)
+SOURCE_URL = "https://orange-mountain-1d16.hninisiimoo.workers.dev/"
 
 XRAY = "./xray/xray"
 
 TEST_URL = "https://www.google.com/generate_204"
 
-TIMEOUT = 10
+TIMEOUT = 8
+XRAY_START_WAIT = 0.8
 
+MAX_WORKERS = 8
+
+BASE_PORT = 20000
+
+
+# ============================================================
+# Download configs
+# ============================================================
 
 def download_configs():
-    r = requests.get(SOURCE_URL, timeout=20)
-    r.raise_for_status()
+    response = requests.get(
+        SOURCE_URL,
+        timeout=20,
+    )
+
+    response.raise_for_status()
+
     return [
         line.strip()
-        for line in r.text.splitlines()
+        for line in response.text.splitlines()
         if line.strip()
     ]
 
+
+# ============================================================
+# Parse VLESS / Trojan
+# ============================================================
 
 def parse_config(line):
 
@@ -38,47 +57,73 @@ def parse_config(line):
         return None
 
     try:
-        u = urlparse(line)
+        parsed = urlparse(line)
 
-        protocol = u.scheme.lower()
+        protocol = parsed.scheme.lower()
 
-        host = u.hostname
-        port = u.port
+        if protocol not in ("vless", "trojan"):
+            return None
 
-        params = parse_qs(u.query)
+        host = parsed.hostname
+        port = parsed.port
+
+        if not host:
+            return None
+
+        if port != 443:
+            return None
+
+        params = parse_qs(
+            parsed.query,
+            keep_blank_values=True,
+        )
 
         def get(name):
             values = params.get(name)
-            return values[0] if values else ""
+
+            if not values:
+                return ""
+
+            return values[0]
 
         network = get("type")
         security = get("security")
+
         ws_host = get("host")
         sni = get("sni")
-        path = unquote(get("path"))
 
-        # Basic requirements
+        path = unquote(
+            get("path")
+        )
+
+        # ====================================================
+        # Required transport
+        # ====================================================
+
         if network != "ws":
             return None
 
         if security != "tls":
             return None
 
-        if port != 443:
-            return None
-
-        if not host:
-            return None
-
-        if not sni:
-            sni = ws_host or host
-
         if not path:
             path = "/"
 
+        # Host fallback
+        if not ws_host:
+            ws_host = host
+
+        # SNI fallback
+        if not sni:
+            sni = ws_host
+
+        # ====================================================
+        # VLESS
+        # ====================================================
+
         if protocol == "vless":
 
-            uuid = u.username
+            uuid = parsed.username
 
             if not uuid:
                 return None
@@ -88,15 +133,19 @@ def parse_config(line):
                 "server": host,
                 "port": 443,
                 "uuid": uuid,
-                "ws_host": ws_host or host,
+                "host": ws_host,
                 "sni": sni,
                 "path": path,
                 "original": line,
             }
 
+        # ====================================================
+        # Trojan
+        # ====================================================
+
         if protocol == "trojan":
 
-            password = u.username
+            password = parsed.username
 
             if not password:
                 return None
@@ -106,7 +155,7 @@ def parse_config(line):
                 "server": host,
                 "port": 443,
                 "password": password,
-                "ws_host": ws_host or host,
+                "host": ws_host,
                 "sni": sni,
                 "path": path,
                 "original": line,
@@ -118,42 +167,51 @@ def parse_config(line):
     return None
 
 
+# ============================================================
+# Create Xray configuration
+# ============================================================
+
 def make_xray_config(config, local_port):
 
     if config["protocol"] == "vless":
 
         outbound = {
             "protocol": "vless",
+
             "settings": {
                 "vnext": [
                     {
                         "address": config["server"],
                         "port": 443,
+
                         "users": [
                             {
                                 "id": config["uuid"],
-                                "encryption": "none"
+                                "encryption": "none",
                             }
-                        ]
+                        ],
                     }
                 ]
             },
+
             "streamSettings": {
                 "network": "ws",
+
                 "security": "tls",
 
                 "tlsSettings": {
                     "serverName": config["sni"],
-                    "allowInsecure": False
+                    "allowInsecure": False,
                 },
 
                 "wsSettings": {
                     "path": config["path"],
+
                     "headers": {
-                        "Host": config["ws_host"]
-                    }
-                }
-            }
+                        "Host": config["host"],
+                    },
+                },
+            },
         }
 
     else:
@@ -166,27 +224,29 @@ def make_xray_config(config, local_port):
                     {
                         "address": config["server"],
                         "port": 443,
-                        "password": config["password"]
+                        "password": config["password"],
                     }
                 ]
             },
 
             "streamSettings": {
                 "network": "ws",
+
                 "security": "tls",
 
                 "tlsSettings": {
                     "serverName": config["sni"],
-                    "allowInsecure": False
+                    "allowInsecure": False,
                 },
 
                 "wsSettings": {
                     "path": config["path"],
+
                     "headers": {
-                        "Host": config["ws_host"]
-                    }
-                }
-            }
+                        "Host": config["host"],
+                    },
+                },
+            },
         }
 
     return {
@@ -197,8 +257,11 @@ def make_xray_config(config, local_port):
         "inbounds": [
             {
                 "listen": "127.0.0.1",
+
                 "port": local_port,
+
                 "protocol": "http",
+
                 "settings": {}
             }
         ],
@@ -209,131 +272,225 @@ def make_xray_config(config, local_port):
     }
 
 
-def test_config(config, index):
+# ============================================================
+# Check one config
+# ============================================================
 
-    local_port = 18000 + index
+def test_config(item):
 
-    xray_config = make_xray_config(
-        config,
-        local_port
-    )
+    index, config = item
 
-    with tempfile.NamedTemporaryFile(
-        mode="w",
-        suffix=".json",
-        delete=False
-    ) as f:
+    local_port = BASE_PORT + index
 
-        json.dump(
-            xray_config,
-            f,
-            indent=2
-        )
-
-        config_file = f.name
-
+    config_file = None
     process = None
 
     try:
+
+        xray_config = make_xray_config(
+            config,
+            local_port,
+        )
+
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            suffix=".json",
+            delete=False,
+            encoding="utf-8",
+        ) as file:
+
+            json.dump(
+                xray_config,
+                file,
+                ensure_ascii=False,
+            )
+
+            config_file = file.name
+
+        # ====================================================
+        # Start Xray
+        # ====================================================
 
         process = subprocess.Popen(
             [
                 XRAY,
                 "run",
                 "-c",
-                config_file
+                config_file,
             ],
+
             stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL
+
+            stderr=subprocess.DEVNULL,
         )
 
-        # Give Xray time to start
-        time.sleep(1)
+        # ====================================================
+        # Wait for local proxy
+        # ====================================================
 
-        # Check that local proxy port is listening
-        sock = socket.socket(
-            socket.AF_INET,
-            socket.SOCK_STREAM
-        )
+        started = False
 
-        sock.settimeout(2)
+        for _ in range(10):
 
-        result = sock.connect_ex(
-            ("127.0.0.1", local_port)
-        )
+            if process.poll() is not None:
+                break
 
-        sock.close()
+            try:
 
-        if result != 0:
-            return False
+                sock = socket.create_connection(
+                    ("127.0.0.1", local_port),
+                    timeout=0.2,
+                )
+
+                sock.close()
+
+                started = True
+
+                break
+
+            except OSError:
+                time.sleep(0.1)
+
+        if not started:
+
+            return {
+                "index": index,
+                "ok": False,
+                "line": config["original"],
+            }
+
+        # ====================================================
+        # Real request through Xray
+        # ====================================================
 
         proxies = {
-            "http": f"http://127.0.0.1:{local_port}",
-            "https": f"http://127.0.0.1:{local_port}",
+            "http":
+                f"http://127.0.0.1:{local_port}",
+
+            "https":
+                f"http://127.0.0.1:{local_port}",
         }
 
-        start = time.time()
+        start = time.perf_counter()
 
-        r = requests.get(
+        response = requests.get(
             TEST_URL,
+
             proxies=proxies,
-            timeout=TIMEOUT
+
+            timeout=TIMEOUT,
+
+            allow_redirects=False,
         )
 
-        delay = int(
-            (time.time() - start) * 1000
+        elapsed = int(
+            (time.perf_counter() - start) * 1000
         )
 
-        if r.status_code in (200, 204):
+        # generate_204 should return 204
+        ok = response.status_code in (
+            200,
+            204,
+        )
+
+        if ok:
 
             print(
-                f"[ONLINE] {delay} ms | "
+                f"[ONLINE] "
+                f"{elapsed} ms | "
                 f"{config['protocol']} | "
                 f"{config['server']}"
             )
 
-            return True
+        else:
 
-        print(
-            f"[FAILED] HTTP {r.status_code} | "
-            f"{config['server']}"
-        )
+            print(
+                f"[FAILED] "
+                f"HTTP {response.status_code} | "
+                f"{config['server']}"
+            )
 
-        return False
+        return {
+            "index": index,
+            "ok": ok,
+            "line": config["original"],
+        }
 
-    except Exception as e:
+    except Exception as error:
 
         print(
             f"[FAILED] "
-            f"{config['protocol']} | "
-            f"{config['server']} | "
-            f"{str(e)[:120]}"
+            f"{config.get('protocol', '?')} | "
+            f"{config.get('server', '?')} | "
+            f"{str(error)[:100]}"
         )
 
-        return False
+        return {
+            "index": index,
+            "ok": False,
+            "line": config["original"],
+        }
 
     finally:
 
+        # ====================================================
+        # Stop Xray
+        # ====================================================
+
         if process:
 
-            process.terminate()
+            try:
+                process.terminate()
+
+                process.wait(
+                    timeout=1
+                )
+
+            except Exception:
+
+                try:
+                    process.kill()
+                except Exception:
+                    pass
+
+        # ====================================================
+        # Delete temporary config
+        # ====================================================
+
+        if config_file:
 
             try:
-                process.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                process.kill()
+                os.remove(
+                    config_file
+                )
 
-        try:
-            os.remove(config_file)
-        except Exception:
-            pass
+            except Exception:
+                pass
 
+
+# ============================================================
+# Main
+# ============================================================
 
 def main():
+
+    print()
+    print("==============================")
+    print(" VLESS / TROJAN CHECKER")
+    print("==============================")
+    print()
 
     print("Downloading configs...")
 
     lines = download_configs()
+
+    print(
+        f"Downloaded: {len(lines)} lines"
+    )
+
+    # ========================================================
+    # Parse
+    # ========================================================
 
     configs = []
 
@@ -342,57 +499,121 @@ def main():
         config = parse_config(line)
 
         if config:
+
             configs.append(config)
 
     print(
-        f"Found {len(configs)} "
-        f"VLESS/Trojan WS TLS 443 configs."
+        f"Testable configs: {len(configs)}"
     )
 
-    working = []
+    print()
 
-    for index, config in enumerate(
-        configs,
-        start=1
-    ):
+    if not configs:
 
         print(
-            f"\n[{index}/{len(configs)}] "
-            f"Testing {config['server']}"
+            "No VLESS/Trojan WS TLS 443 configs found."
         )
 
-        if test_config(
-            config,
-            index
+        open(
+            "working.txt",
+            "w",
+            encoding="utf-8",
+        ).close()
+
+        return
+
+    # ========================================================
+    # Parallel testing
+    # ========================================================
+
+    items = list(
+        enumerate(
+            configs,
+            start=1,
+        )
+    )
+
+    results = []
+
+    with concurrent.futures.ThreadPoolExecutor(
+        max_workers=MAX_WORKERS
+    ) as executor:
+
+        futures = [
+            executor.submit(
+                test_config,
+                item,
+            )
+            for item in items
+        ]
+
+        for future in concurrent.futures.as_completed(
+            futures
         ):
 
-            working.append(
-                config["original"]
-            )
+            result = future.result()
+
+            results.append(result)
+
+    # ========================================================
+    # Keep original order
+    # ========================================================
+
+    results.sort(
+        key=lambda x: x["index"]
+    )
+
+    working = [
+        result["line"]
+        for result in results
+        if result["ok"]
+    ]
+
+    # ========================================================
+    # Save working configs
+    # ========================================================
 
     with open(
         "working.txt",
         "w",
-        encoding="utf-8"
-    ) as f:
+        encoding="utf-8",
+    ) as file:
 
-        f.write(
-            "\n".join(working)
-        )
+        for line in working:
 
-        if working:
-            f.write("\n")
+            file.write(
+                line + "\n"
+            )
 
-    print("\n============================")
-    print("CHECK FINISHED")
-    print("============================")
+    # ========================================================
+    # Summary
+    # ========================================================
+
+    print()
+    print("==============================")
+    print(" CHECK FINISHED")
+    print("==============================")
+
     print(
-        f"Working configs: "
-        f"{len(working)}"
+        f"Total downloaded : {len(lines)}"
     )
+
     print(
-        f"Total tested: "
-        f"{len(configs)}"
+        f"Tested           : {len(configs)}"
+    )
+
+    print(
+        f"Working          : {len(working)}"
+    )
+
+    print(
+        f"Failed           : "
+        f"{len(configs) - len(working)}"
+    )
+
+    print()
+    print(
+        "Output: working.txt"
     )
 
 
