@@ -1,7 +1,6 @@
 import concurrent.futures
 import json
 import os
-import re
 import socket
 import subprocess
 import tempfile
@@ -11,23 +10,16 @@ from urllib.parse import parse_qs, unquote, urlparse
 import requests
 
 
-SOURCE_URL = "https://orange-mountain-1d16.hninisiimoo.workers.dev/"
+SOURCE_URL = "https://long-feather-2859.hninisiimoo.workers.dev/"
 
 XRAY = "./xray/xray"
 
 TEST_URL = "https://www.google.com/generate_204"
 
 TIMEOUT = 8
-XRAY_START_WAIT = 0.8
-
 MAX_WORKERS = 8
-
 BASE_PORT = 20000
 
-
-# ============================================================
-# Download configs
-# ============================================================
 
 def download_configs():
     response = requests.get(
@@ -43,10 +35,6 @@ def download_configs():
         if line.strip()
     ]
 
-
-# ============================================================
-# Parse VLESS / Trojan
-# ============================================================
 
 def parse_config(line):
 
@@ -67,10 +55,7 @@ def parse_config(line):
         host = parsed.hostname
         port = parsed.port
 
-        if not host:
-            return None
-
-        if port != 443:
+        if not host or port != 443:
             return None
 
         params = parse_qs(
@@ -80,25 +65,14 @@ def parse_config(line):
 
         def get(name):
             values = params.get(name)
-
-            if not values:
-                return ""
-
-            return values[0]
+            return values[0] if values else ""
 
         network = get("type")
         security = get("security")
 
         ws_host = get("host")
         sni = get("sni")
-
-        path = unquote(
-            get("path")
-        )
-
-        # ====================================================
-        # Required transport
-        # ====================================================
+        path = unquote(get("path"))
 
         if network != "ws":
             return None
@@ -109,17 +83,11 @@ def parse_config(line):
         if not path:
             path = "/"
 
-        # Host fallback
         if not ws_host:
             ws_host = host
 
-        # SNI fallback
         if not sni:
             sni = ws_host
-
-        # ====================================================
-        # VLESS
-        # ====================================================
 
         if protocol == "vless":
 
@@ -138,10 +106,6 @@ def parse_config(line):
                 "path": path,
                 "original": line,
             }
-
-        # ====================================================
-        # Trojan
-        # ====================================================
 
         if protocol == "trojan":
 
@@ -166,10 +130,6 @@ def parse_config(line):
 
     return None
 
-
-# ============================================================
-# Create Xray configuration
-# ============================================================
 
 def make_xray_config(config, local_port):
 
@@ -196,7 +156,6 @@ def make_xray_config(config, local_port):
 
             "streamSettings": {
                 "network": "ws",
-
                 "security": "tls",
 
                 "tlsSettings": {
@@ -231,7 +190,6 @@ def make_xray_config(config, local_port):
 
             "streamSettings": {
                 "network": "ws",
-
                 "security": "tls",
 
                 "tlsSettings": {
@@ -257,24 +215,17 @@ def make_xray_config(config, local_port):
         "inbounds": [
             {
                 "listen": "127.0.0.1",
-
                 "port": local_port,
-
                 "protocol": "http",
-
-                "settings": {}
+                "settings": {},
             }
         ],
 
         "outbounds": [
             outbound
-        ]
+        ],
     }
 
-
-# ============================================================
-# Check one config
-# ============================================================
 
 def test_config(item):
 
@@ -307,10 +258,6 @@ def test_config(item):
 
             config_file = file.name
 
-        # ====================================================
-        # Start Xray
-        # ====================================================
-
         process = subprocess.Popen(
             [
                 XRAY,
@@ -318,15 +265,9 @@ def test_config(item):
                 "-c",
                 config_file,
             ],
-
             stdout=subprocess.DEVNULL,
-
             stderr=subprocess.DEVNULL,
         )
-
-        # ====================================================
-        # Wait for local proxy
-        # ====================================================
 
         started = False
 
@@ -345,7 +286,6 @@ def test_config(item):
                 sock.close()
 
                 started = True
-
                 break
 
             except OSError:
@@ -359,27 +299,17 @@ def test_config(item):
                 "line": config["original"],
             }
 
-        # ====================================================
-        # Real request through Xray
-        # ====================================================
-
         proxies = {
-            "http":
-                f"http://127.0.0.1:{local_port}",
-
-            "https":
-                f"http://127.0.0.1:{local_port}",
+            "http": f"http://127.0.0.1:{local_port}",
+            "https": f"http://127.0.0.1:{local_port}",
         }
 
         start = time.perf_counter()
 
         response = requests.get(
             TEST_URL,
-
             proxies=proxies,
-
             timeout=TIMEOUT,
-
             allow_redirects=False,
         )
 
@@ -387,11 +317,7 @@ def test_config(item):
             (time.perf_counter() - start) * 1000
         )
 
-        # generate_204 should return 204
-        ok = response.status_code in (
-            200,
-            204,
-        )
+        ok = response.status_code in (200, 204)
 
         if ok:
 
@@ -433,18 +359,11 @@ def test_config(item):
 
     finally:
 
-        # ====================================================
-        # Stop Xray
-        # ====================================================
-
         if process:
 
             try:
                 process.terminate()
-
-                process.wait(
-                    timeout=1
-                )
+                process.wait(timeout=1)
 
             except Exception:
 
@@ -453,24 +372,13 @@ def test_config(item):
                 except Exception:
                     pass
 
-        # ====================================================
-        # Delete temporary config
-        # ====================================================
-
         if config_file:
 
             try:
-                os.remove(
-                    config_file
-                )
-
+                os.remove(config_file)
             except Exception:
                 pass
 
-
-# ============================================================
-# Main
-# ============================================================
 
 def main():
 
@@ -488,10 +396,6 @@ def main():
         f"Downloaded: {len(lines)} lines"
     )
 
-    # ========================================================
-    # Parse
-    # ========================================================
-
     configs = []
 
     for line in lines:
@@ -499,14 +403,11 @@ def main():
         config = parse_config(line)
 
         if config:
-
             configs.append(config)
 
     print(
         f"Testable configs: {len(configs)}"
     )
-
-    print()
 
     if not configs:
 
@@ -521,10 +422,6 @@ def main():
         ).close()
 
         return
-
-    # ========================================================
-    # Parallel testing
-    # ========================================================
 
     items = list(
         enumerate(
@@ -551,13 +448,9 @@ def main():
             futures
         ):
 
-            result = future.result()
-
-            results.append(result)
-
-    # ========================================================
-    # Keep original order
-    # ========================================================
+            results.append(
+                future.result()
+            )
 
     results.sort(
         key=lambda x: x["index"]
@@ -569,10 +462,6 @@ def main():
         if result["ok"]
     ]
 
-    # ========================================================
-    # Save working configs
-    # ========================================================
-
     with open(
         "working.txt",
         "w",
@@ -580,14 +469,7 @@ def main():
     ) as file:
 
         for line in working:
-
-            file.write(
-                line + "\n"
-            )
-
-    # ========================================================
-    # Summary
-    # ========================================================
+            file.write(line + "\n")
 
     print()
     print("==============================")
@@ -612,9 +494,7 @@ def main():
     )
 
     print()
-    print(
-        "Output: working.txt"
-    )
+    print("Output: working.txt")
 
 
 if __name__ == "__main__":
