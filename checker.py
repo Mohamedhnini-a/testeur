@@ -9,8 +9,7 @@ from urllib.parse import urlparse, parse_qs, unquote
 
 
 SOURCE_URL = (
-    "https://raw.githubusercontent.com/barry-far/"
-    "V2ray-Config/refs/heads/main/All_Configs_Sub.txt"
+    "https://orange-mountain-1d16.hninisiimoo.workers.dev/"
 )
 
 XRAY = "./xray/xray"
