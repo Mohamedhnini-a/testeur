@@ -1,7 +1,14 @@
-name: Check Working Configs
+name: Check and Update Working Configs
 
 on:
   workflow_dispatch:
+
+  schedule:
+    # كل 24 ساعة - 00:00 UTC
+    - cron: "0 0 * * *"
+
+permissions:
+  contents: write
 
 jobs:
   check:
@@ -29,7 +36,7 @@ jobs:
 
 
       # ==========================================
-      # Install Python dependencies
+      # Install dependencies
       # ==========================================
 
       - name: Install dependencies
@@ -68,12 +75,73 @@ jobs:
 
 
       # ==========================================
-      # Upload working configs
+      # Prepare subscription file
+      # ==========================================
+
+      - name: Prepare working_configs.txt
+        run: |
+
+          if [ -f working.txt ]; then
+            mv working.txt working_configs.txt
+          else
+            touch working_configs.txt
+          fi
+
+
+      # ==========================================
+      # Show result
+      # ==========================================
+
+      - name: Show result
+        run: |
+
+          echo "=============================="
+          echo " WORKING CONFIGS"
+          echo "=============================="
+
+          echo "Count:"
+          wc -l working_configs.txt
+
+          echo
+          echo "First configs:"
+          head -n 10 working_configs.txt
+
+
+      # ==========================================
+      # Commit and push
+      # ==========================================
+
+      - name: Update repository
+        run: |
+
+          git config user.name "github-actions[bot]"
+
+          git config user.email \
+            "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add working_configs.txt
+
+          if git diff --cached --quiet; then
+
+            echo "No changes in working_configs.txt"
+
+          else
+
+            git commit \
+              -m "Update working configs"
+
+            git push
+
+          fi
+
+
+      # ==========================================
+      # Upload artifact
       # ==========================================
 
       - name: Upload working configs
         uses: actions/upload-artifact@v5
         with:
           name: working-configs
-          path: working.txt
+          path: working_configs.txt
           if-no-files-found: error
