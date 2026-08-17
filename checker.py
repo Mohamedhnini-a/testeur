@@ -16,7 +16,7 @@ XRAY = "./xray/xray"
 
 TEST_URL = "https://www.google.com/generate_204"
 
-TIMEOUT = 8
+TIMEOUT = 5
 MAX_WORKERS = 32
 BASE_PORT = 20000
 
