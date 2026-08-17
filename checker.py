@@ -17,7 +17,7 @@ XRAY = "./xray/xray"
 TEST_URL = "https://www.google.com/generate_204"
 
 TIMEOUT = 8
-MAX_WORKERS = 8
+MAX_WORKERS = 32
 BASE_PORT = 20000
 
 
@@ -432,25 +432,43 @@ def main():
 
     results = []
 
+    # Keep only a bounded number of tasks queued at once.
+    # This is much lighter when the source contains 10,000+ configs.
     with concurrent.futures.ThreadPoolExecutor(
         max_workers=MAX_WORKERS
     ) as executor:
 
-        futures = [
-            executor.submit(
-                test_config,
-                item,
-            )
-            for item in items
-        ]
+        iterator = iter(items)
+        pending = set()
 
-        for future in concurrent.futures.as_completed(
-            futures
-        ):
+        # Fill the worker pool.
+        for _ in range(MAX_WORKERS):
+            try:
+                pending.add(
+                    executor.submit(test_config, next(iterator))
+                )
+            except StopIteration:
+                break
 
-            results.append(
-                future.result()
+        while pending:
+            done, pending = concurrent.futures.wait(
+                pending,
+                return_when=concurrent.futures.FIRST_COMPLETED,
             )
+
+            for future in done:
+                try:
+                    results.append(future.result())
+                except Exception as error:
+                    print(f"[FAILED] Worker error: {str(error)[:100]}")
+
+                # Immediately replace every completed task with another one.
+                try:
+                    pending.add(
+                        executor.submit(test_config, next(iterator))
+                    )
+                except StopIteration:
+                    pass
 
     results.sort(
         key=lambda x: x["index"]
