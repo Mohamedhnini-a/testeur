@@ -19,7 +19,7 @@ TEST_URL = "https://www.google.com/generate_204"
 
 TIMEOUT = 5
 
-MAX_WORKERS = 32
+MAX_WORKERS = 20
 
 BASE_PORT = 20000
 
