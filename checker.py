@@ -12,107 +12,64 @@ import requests
 
 
 SOURCE_URL = "https://long-feather-2859.hninisiimoo.workers.dev/"
-
 XRAY = "./xray/xray"
-
 TEST_URL = "https://www.google.com/generate_204"
-
 TIMEOUT = 5
-
 MAX_WORKERS = 20
-
 BASE_PORT = 20000
-
-# عدد الاختبارات لكل Config
 TEST_ROUNDS = 3
-
-# أقل عدد من الاختبارات الناجحة حتى تعتبر Config Working
 MIN_SUCCESS = 2
 
 
 def download_configs():
-
-    response = requests.get(
-        SOURCE_URL,
-        timeout=20,
-    )
-
+    response = requests.get(SOURCE_URL, timeout=20)
     response.raise_for_status()
-
-    return [
-        line.strip()
-        for line in response.text.splitlines()
-        if line.strip()
-    ]
+    return [line.strip() for line in response.text.splitlines() if line.strip()]
 
 
 def parse_config(line):
-
-    if not (
-        line.startswith("vless://")
-        or line.startswith("trojan://")
-    ):
+    if not (line.startswith("vless://") or line.startswith("trojan://")):
         return None
 
     try:
-
         parsed = urlparse(line)
-
         protocol = parsed.scheme.lower()
-
         if protocol not in ("vless", "trojan"):
             return None
 
         host = parsed.hostname
-
         port = parsed.port
 
-        if not host or port != 443:
+        # FIX: handle case where port is not present in URL
+        if not host or port is None or port != 443:
             return None
 
-        params = parse_qs(
-            parsed.query,
-            keep_blank_values=True,
-        )
+        params = parse_qs(parsed.query, keep_blank_values=True)
 
         def get(name):
-
             values = params.get(name)
-
             return values[0] if values else ""
 
         network = get("type")
-
         security = get("security")
-
         ws_host = get("host")
-
         sni = get("sni")
-
         path = unquote(get("path"))
 
-        if network != "ws":
-            return None
-
-        if security != "tls":
+        if network != "ws" or security != "tls":
             return None
 
         if not path:
             path = "/"
-
         if not ws_host:
             ws_host = host
-
         if not sni:
             sni = ws_host
 
         if protocol == "vless":
-
             uuid = parsed.username
-
             if not uuid:
                 return None
-
             return {
                 "protocol": "vless",
                 "server": host,
@@ -125,12 +82,9 @@ def parse_config(line):
             }
 
         if protocol == "trojan":
-
             password = parsed.username
-
             if not password:
                 return None
-
             return {
                 "protocol": "trojan",
                 "server": host,
@@ -149,751 +103,288 @@ def parse_config(line):
 
 
 def make_xray_config(config, local_port):
+    stream_settings = {
+        "network": "ws",
+        "security": "tls",
+        "tlsSettings": {
+            "serverName": config["sni"],
+            "allowInsecure": False,
+        },
+        "wsSettings": {
+            "path": config["path"],
+            "headers": {"Host": config["host"]},
+        },
+    }
 
     if config["protocol"] == "vless":
-
         outbound = {
-
             "protocol": "vless",
-
             "settings": {
-
                 "vnext": [
-
                     {
-
                         "address": config["server"],
-
                         "port": 443,
-
                         "users": [
-
                             {
-
                                 "id": config["uuid"],
-
                                 "encryption": "none",
-
                             }
-
                         ],
-
                     }
-
                 ]
-
             },
-
-            "streamSettings": {
-
-                "network": "ws",
-
-                "security": "tls",
-
-                "tlsSettings": {
-
-                    "serverName": config["sni"],
-
-                    "allowInsecure": False,
-
-                },
-
-                "wsSettings": {
-
-                    "path": config["path"],
-
-                    "headers": {
-
-                        "Host": config["host"],
-
-                    },
-
-                },
-
-            },
-
+            "streamSettings": stream_settings,
         }
-
-    else:
-
+    else:  # trojan
         outbound = {
-
             "protocol": "trojan",
-
             "settings": {
-
                 "servers": [
-
                     {
-
                         "address": config["server"],
-
                         "port": 443,
-
                         "password": config["password"],
-
                     }
-
                 ]
-
             },
-
-            "streamSettings": {
-
-                "network": "ws",
-
-                "security": "tls",
-
-                "tlsSettings": {
-
-                    "serverName": config["sni"],
-
-                    "allowInsecure": False,
-
-                },
-
-                "wsSettings": {
-
-                    "path": config["path"],
-
-                    "headers": {
-
-                        "Host": config["host"],
-
-                    },
-
-                },
-
-            },
-
+            "streamSettings": stream_settings,
         }
 
     return {
-
-        "log": {
-
-            "loglevel": "error"
-
-        },
-
+        "log": {"loglevel": "error"},
         "inbounds": [
-
             {
-
                 "listen": "127.0.0.1",
-
                 "port": local_port,
-
                 "protocol": "http",
-
                 "settings": {},
-
             }
-
         ],
-
-        "outbounds": [
-
-            outbound
-
-        ],
-
+        "outbounds": [outbound],
     }
 
 
 def test_once(proxies):
-
-    """
-    يقوم باختبار واحد فقط ويرجع:
-    latency بالـ ms إذا نجح
-    أو None إذا فشل
-    """
-
     try:
-
         start = time.perf_counter()
-
         response = requests.get(
             TEST_URL,
             proxies=proxies,
             timeout=TIMEOUT,
             allow_redirects=False,
         )
-
-        elapsed = (
-            time.perf_counter() - start
-        ) * 1000
-
+        elapsed = (time.perf_counter() - start) * 1000
         if response.status_code in (200, 204):
-
             return round(elapsed)
-
         return None
-
     except Exception:
-
         return None
 
 
-def test_config(item):
-
-    index, config = item
-
+def test_config(index, config):
     local_port = BASE_PORT + index
-
     config_file = None
-
     process = None
-
     latencies = []
 
     try:
-
-        # =========================
-        # Xray config
-        # =========================
-
-        xray_config = make_xray_config(
-            config,
-            local_port,
-        )
-
-        # =========================
-        # Temporary config file
-        # =========================
+        xray_config = make_xray_config(config, local_port)
 
         with tempfile.NamedTemporaryFile(
-            mode="w",
-            suffix=".json",
-            delete=False,
-            encoding="utf-8",
-        ) as file:
-
-            json.dump(
-                xray_config,
-                file,
-                ensure_ascii=False,
-            )
-
-            config_file = file.name
-
-        # =========================
-        # Start Xray
-        # =========================
+            mode="w", suffix=".json", delete=False, encoding="utf-8"
+        ) as f:
+            json.dump(xray_config, f, ensure_ascii=False)
+            config_file = f.name
 
         process = subprocess.Popen(
-            [
-                XRAY,
-                "run",
-                "-c",
-                config_file,
-            ],
+            [XRAY, "run", "-c", config_file],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
 
-        # =========================
-        # Wait for local proxy
-        # =========================
-
+        # Wait for proxy to start
         started = False
-
         for _ in range(10):
-
             if process.poll() is not None:
                 break
-
             try:
-
-                sock = socket.create_connection(
-                    (
-                        "127.0.0.1",
-                        local_port,
-                    ),
-                    timeout=0.2,
-                )
-
+                sock = socket.create_connection(("127.0.0.1", local_port), timeout=0.2)
                 sock.close()
-
                 started = True
-
                 break
-
             except OSError:
-
                 time.sleep(0.1)
 
         if not started:
-
-            print(
-                f"[FAILED] "
-                f"{config['protocol']} | "
-                f"{config['server']} | "
-                f"Xray did not start"
-            )
-
-            return {
-                "index": index,
-                "ok": False,
-                "line": config["original"],
-                "latency": None,
-                "latencies": [],
-            }
-
-        # =========================
-        # Local proxy
-        # =========================
-
-        proxies = {
-
-            "http":
-                f"http://127.0.0.1:{local_port}",
-
-            "https":
-                f"http://127.0.0.1:{local_port}",
-
-        }
-
-        # =========================
-        # Multiple latency tests
-        # =========================
-
-        for round_number in range(
-            TEST_ROUNDS
-        ):
-
-            latency = test_once(
-                proxies
-            )
-
-            if latency is not None:
-
-                latencies.append(
-                    latency
-                )
-
-            # pause صغيرة بين الاختبارات
-            if (
-                round_number
-                < TEST_ROUNDS - 1
-            ):
-
-                time.sleep(0.15)
-
-        # =========================
-        # Check minimum successes
-        # =========================
-
-        success_count = len(
-            latencies
-        )
-
-        if success_count < MIN_SUCCESS:
-
-            print(
-                f"[FAILED] "
-                f"{config['protocol']} | "
-                f"{config['server']} | "
-                f"{success_count}/{TEST_ROUNDS} successful"
-            )
-
+            print(f"[FAILED] {config['protocol']} | {config['server']} | Xray did not start")
             return {
                 "index": index,
                 "ok": False,
                 "line": config["original"],
                 "latency": None,
                 "latencies": latencies,
+                "protocol": config.get("protocol", "?"),
+                "server": config.get("server", "?"),
             }
 
-        # =========================
-        # Median latency
-        # =========================
+        proxies = {
+            "http": f"http://127.0.0.1:{local_port}",
+            "https": f"http://127.0.0.1:{local_port}",
+        }
 
-        final_latency = int(
-            median(latencies)
-        )
+        for round_number in range(TEST_ROUNDS):
+            latency = test_once(proxies)
+            if latency is not None:
+                latencies.append(latency)
+            if round_number < TEST_ROUNDS - 1:
+                time.sleep(0.15)
 
-        print(
-            f"[ONLINE] "
-            f"{final_latency} ms | "
-            f"{latencies} | "
-            f"{config['protocol']} | "
-            f"{config['server']}"
-        )
+        success_count = len(latencies)
+        if success_count < MIN_SUCCESS:
+            print(f"[FAILED] {config['protocol']} | {config['server']} | {success_count}/{TEST_ROUNDS} successful")
+            return {
+                "index": index,
+                "ok": False,
+                "line": config["original"],
+                "latency": None,
+                "latencies": latencies,
+                "protocol": config["protocol"],
+                "server": config["server"],
+            }
 
+        final_latency = int(median(latencies))
+        print(f"[ONLINE] {final_latency} ms | {latencies} | {config['protocol']} | {config['server']}")
         return {
             "index": index,
             "ok": True,
             "line": config["original"],
             "latency": final_latency,
             "latencies": latencies,
+            "protocol": config["protocol"],
+            "server": config["server"],
         }
 
     except Exception as error:
-
-        print(
-            f"[FAILED] "
-            f"{config.get('protocol', '?')} | "
-            f"{config.get('server', '?')} | "
-            f"{str(error)[:100]}"
-        )
-
+        print(f"[FAILED] {config.get('protocol', '?')} | {config.get('server', '?')} | {str(error)[:100]}")
         return {
             "index": index,
             "ok": False,
             "line": config["original"],
             "latency": None,
             "latencies": latencies,
+            "protocol": config.get("protocol", "?"),
+            "server": config.get("server", "?"),
         }
 
     finally:
-
-        # =========================
-        # Stop Xray
-        # =========================
-
         if process:
-
             try:
-
                 process.terminate()
-
-                process.wait(
-                    timeout=1
-                )
-
+                process.wait(timeout=1)
             except Exception:
-
                 try:
-
                     process.kill()
-
                 except Exception:
                     pass
-
-        # =========================
-        # Delete temporary config
-        # =========================
-
         if config_file:
-
             try:
-
-                os.remove(
-                    config_file
-                )
-
+                os.remove(config_file)
             except Exception:
                 pass
 
 
 def main():
+    print("\n==============================")
+    print(" VLESS / TROJAN CHECKER")
+    print(" FASTEST CONFIG SORTING")
+    print("==============================\n")
 
-    print()
-
-    print(
-        "=============================="
-    )
-
-    print(
-        " VLESS / TROJAN CHECKER"
-    )
-
-    print(
-        " FASTEST CONFIG SORTING"
-    )
-
-    print(
-        "=============================="
-    )
-
-    print()
-
-    print(
-        "Downloading configs..."
-    )
-
-    # =========================
-    # Download
-    # =========================
-
-    lines = download_configs()
-
-    print(
-        f"Downloaded: {len(lines)} lines"
-    )
-
-    # =========================
-    # Parse configs
-    # =========================
-
-    configs = []
-
-    for line in lines:
-
-        config = parse_config(
-            line
-        )
-
-        if config:
-
-            configs.append(
-                config
-            )
-
-    print(
-        f"Testable configs: "
-        f"{len(configs)}"
-    )
-
-    print(
-        f"Latency tests per config: "
-        f"{TEST_ROUNDS}"
-    )
-
-    print(
-        f"Minimum successful tests: "
-        f"{MIN_SUCCESS}"
-    )
-
-    # =========================
-    # No configs
-    # =========================
-
-    if not configs:
-
-        print()
-
-        print(
-            "No VLESS/Trojan "
-            "WS TLS 443 configs found."
-        )
-
-        open(
-            "working.txt",
-            "w",
-            encoding="utf-8",
-        ).close()
-
+    # Check if Xray binary exists
+    if not os.path.isfile(XRAY):
+        print(f"ERROR: Xray binary not found at '{XRAY}'")
         return
 
-    # =========================
-    # Number configs
-    # =========================
+    print("Downloading configs...")
+    lines = download_configs()
+    print(f"Downloaded: {len(lines)} lines")
 
-    items = list(
-        enumerate(
-            configs,
-            start=1,
-        )
-    )
+    # Parse configs
+    configs = []
+    for line in lines:
+        config = parse_config(line)
+        if config:
+            configs.append(config)
 
+    print(f"Testable configs: {len(configs)}")
+    print(f"Latency tests per config: {TEST_ROUNDS}")
+    print(f"Minimum successful tests: {MIN_SUCCESS}")
+
+    if not configs:
+        print("\nNo VLESS/Trojan WS TLS 443 configs found.")
+        open("working.txt", "w", encoding="utf-8").close()
+        return
+
+    # Prepare tasks for threading
+    tasks = list(enumerate(configs, start=1))
     results = []
 
-    # =========================
-    # ThreadPool
-    # =========================
-
-    with concurrent.futures.ThreadPoolExecutor(
-        max_workers=MAX_WORKERS
-    ) as executor:
-
-        iterator = iter(items)
-
+    with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        iterator = iter(tasks)
         pending = set()
 
-        # =========================
-        # Fill worker pool
-        # =========================
-
-        for _ in range(
-            MAX_WORKERS
-        ):
-
+        # Fill the pool initially
+        for _ in range(MAX_WORKERS):
             try:
-
-                pending.add(
-                    executor.submit(
-                        test_config,
-                        next(iterator),
-                    )
-                )
-
+                pending.add(executor.submit(test_config, *next(iterator)))
             except StopIteration:
-
                 break
 
-        # =========================
-        # Process completed tasks
-        # =========================
-
+        # Process completed tasks and keep pool full
         while pending:
-
-            done, pending = (
-                concurrent.futures.wait(
-                    pending,
-                    return_when=(
-                        concurrent.futures
-                        .FIRST_COMPLETED
-                    ),
-                )
+            done, pending = concurrent.futures.wait(
+                pending,
+                return_when=concurrent.futures.FIRST_COMPLETED
             )
 
             for future in done:
-
                 try:
+                    results.append(future.result())
+                except Exception as e:
+                    print(f"[FAILED] Worker error: {str(e)[:100]}")
 
-                    results.append(
-                        future.result()
-                    )
-
-                except Exception as error:
-
-                    print(
-                        "[FAILED] "
-                        f"Worker error: "
-                        f"{str(error)[:100]}"
-                    )
-
-                # =========================
-                # Replace completed task
-                # =========================
-
+                # Submit a new task if any remain
                 try:
-
-                    pending.add(
-                        executor.submit(
-                            test_config,
-                            next(iterator),
-                        )
-                    )
-
+                    pending.add(executor.submit(test_config, *next(iterator)))
                 except StopIteration:
-
                     pass
 
-    # =========================
-    # Working configs only
-    # =========================
+    # Filter working results
+    working_results = [r for r in results if r["ok"]]
+    working_results.sort(key=lambda x: (x["latency"], x["index"]))
 
-    working_results = [
+    # Write output
+    with open("working.txt", "w", encoding="utf-8") as f:
+        for r in working_results:
+            f.write(r["line"] + "\n")
 
-        result
-
-        for result in results
-
-        if result["ok"]
-
-    ]
-
-    # =========================
-    # Sort:
-    #
-    # fastest → slowest
-    #
-    # latency ASC
-    # =========================
-
-    working_results.sort(
-        key=lambda x: (
-            x["latency"],
-            x["index"],
-        )
-    )
-
-    # =========================
-    # Write working.txt
-    # =========================
-
-    with open(
-        "working.txt",
-        "w",
-        encoding="utf-8",
-    ) as file:
-
-        for result in working_results:
-
-            file.write(
-                result["line"]
-                + "\n"
-            )
-
-    # =========================
     # Statistics
-    # =========================
+    working_count = len(working_results)
+    failed_count = len(configs) - working_count
 
-    working_count = len(
-        working_results
-    )
+    print("\n==============================")
+    print(" CHECK FINISHED")
+    print("==============================")
+    print(f"Total downloaded : {len(lines)}")
+    print(f"Tested           : {len(configs)}")
+    print(f"Working          : {working_count}")
+    print(f"Failed           : {failed_count}\n")
 
-    failed_count = (
-        len(configs)
-        - working_count
-    )
+    print("Fastest configs:")
+    for pos, r in enumerate(working_results[:10], start=1):
+        print(f"{pos:02d}. {r['latency']} ms | {r.get('protocol','?')} | {r.get('server','?')}")
 
-    print()
-
-    print(
-        "=============================="
-    )
-
-    print(
-        " CHECK FINISHED"
-    )
-
-    print(
-        "=============================="
-    )
-
-    print(
-        f"Total downloaded : "
-        f"{len(lines)}"
-    )
-
-    print(
-        f"Tested           : "
-        f"{len(configs)}"
-    )
-
-    print(
-        f"Working          : "
-        f"{working_count}"
-    )
-
-    print(
-        f"Failed           : "
-        f"{failed_count}"
-    )
-
-    print()
-
-    # =========================
-    # Show fastest configs
-    # =========================
-
-    print(
-        "Fastest configs:"
-    )
-
-    for position, result in enumerate(
-        working_results[:10],
-        start=1,
-    ):
-
-        print(
-            f"{position:02d}. "
-            f"{result['latency']} ms | "
-            f"{result['protocol']} | "
-            f"{result['server']}"
-        )
-
-    print()
-
-    print(
-        "Output: working.txt"
-    )
+    print("\nOutput: working.txt")
 
 
 if __name__ == "__main__":
-
     main()
