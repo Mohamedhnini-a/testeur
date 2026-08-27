@@ -14,8 +14,8 @@ import requests
 SOURCE_URL = "https://long-feather-2859.hninisiimoo.workers.dev/"
 XRAY = "./xray/xray"
 TEST_URL = "https://www.google.com/generate_204"
-TIMEOUT = 5
-MAX_WORKERS = 20
+TIMEOUT = 8
+MAX_WORKERS = 10
 BASE_PORT = 20000
 TEST_ROUNDS = 3
 MIN_SUCCESS = 2
