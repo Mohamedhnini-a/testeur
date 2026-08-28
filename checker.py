@@ -14,11 +14,11 @@ import requests
 SOURCE_URL = "https://long-feather-2859.hninisiimoo.workers.dev/"
 XRAY = "./xray/xray"
 TEST_URL = "https://www.google.com/generate_204"
-TIMEOUT = 13
-MAX_WORKERS = 10
+TIMEOUT = 10
+MAX_WORKERS = 5
 BASE_PORT = 20000
-TEST_ROUNDS = 3
-MIN_SUCCESS = 2
+TEST_ROUNDS = 1
+MIN_SUCCESS = 1
 
 
 def download_configs():
