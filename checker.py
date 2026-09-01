@@ -12,8 +12,8 @@ import requests
 
 
 SOURCE_URLS = [
-    "https://long-feather-2859.hninisiimoo.workers.dev/",
-    ""
+    "https://github.com/Mohamedhnini-a/testeur/raw/refs/heads/main/working_configs.txt",
+    "https://long-feather-2859.hninisiimoo.workers.dev/"
 ]
 XRAY = "./xray/xray"
 TEST_URL = "https://www.google.com/generate_204"
