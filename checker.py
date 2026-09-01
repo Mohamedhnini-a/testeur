@@ -25,9 +25,32 @@ MIN_SUCCESS = 1
 
 
 def download_configs():
-    response = requests.get(SOURCE_URL, timeout=20)
-    response.raise_for_status()
-    return [line.strip() for line in response.text.splitlines() if line.strip()]
+    configs = []
+
+    for source_url in SOURCE_URLS:
+        try:
+            print(f"Downloading: {source_url}")
+
+            response = requests.get(source_url, timeout=20)
+            response.raise_for_status()
+
+            source_configs = [
+                line.strip()
+                for line in response.text.splitlines()
+                if line.strip()
+            ]
+
+            print(f"  → {len(source_configs)} lines")
+
+            configs.extend(source_configs)
+
+        except requests.RequestException as error:
+            print(f"  → FAILED: {error}")
+
+    # Remove duplicates while preserving order
+    configs = list(dict.fromkeys(configs))
+
+    return configs
 
 
 def parse_config(line):
