@@ -11,7 +11,10 @@ from urllib.parse import parse_qs, unquote, urlparse
 import requests
 
 
-SOURCE_URL = "https://long-feather-2859.hninisiimoo.workers.dev/"
+SOURCE_URLS = [
+    "https://long-feather-2859.hninisiimoo.workers.dev/",
+    ""
+]
 XRAY = "./xray/xray"
 TEST_URL = "https://www.google.com/generate_204"
 TIMEOUT = 15
