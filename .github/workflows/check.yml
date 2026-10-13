@@ -4,8 +4,8 @@ on:
   workflow_dispatch:
 
   schedule:
-    # كل 6 ساعات - UTC
-    - cron: "0 */23 * * *"
+  # كل يومين - UTC
+  - cron: "0 0 */2 * *"
 
 permissions:
   contents: write
