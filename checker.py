@@ -13,7 +13,7 @@ import requests
 
 SOURCE_URLS = [
     "https://github.com/Mohamedhnini-a/testeur/raw/refs/heads/main/working_configs.txt",
-    "https://long-feather-2859.hninisiimoo.workers.dev/"
+    "https://github.com/Mohamedhnini-a/Neverstops/raw/refs/heads/main/sub.txt"
 ]
 XRAY = "./xray/xray"
 TEST_URL = "https://www.google.com/generate_204"
