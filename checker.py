@@ -5,6 +5,7 @@ import socket
 import subprocess
 import tempfile
 import time
+import base64  # ⚠️ زدنا هادي باش نفكو VMess
 from statistics import median
 from urllib.parse import parse_qs, unquote, urlparse
 
@@ -26,47 +27,67 @@ MIN_SUCCESS = 1
 
 def download_configs():
     configs = []
-
     for source_url in SOURCE_URLS:
         try:
             print(f"Downloading: {source_url}")
-
             response = requests.get(source_url, timeout=20)
             response.raise_for_status()
-
-            source_configs = [
-                line.strip()
-                for line in response.text.splitlines()
-                if line.strip()
-            ]
-
+            source_configs = [line.strip() for line in response.text.splitlines() if line.strip()]
             print(f"  → {len(source_configs)} lines")
-
             configs.extend(source_configs)
-
         except requests.RequestException as error:
             print(f"  → FAILED: {error}")
-
-    # Remove duplicates while preserving order
     configs = list(dict.fromkeys(configs))
-
     return configs
 
 
 def parse_config(line):
+    # ==========================================
+    # 1. معالجة VMess
+    # ==========================================
+    if line.startswith("vmess://"):
+        try:
+            b64_str = line[8:].split("#")[0].strip()
+            b64_str += "=" * ((4 - len(b64_str) % 4) % 4)
+            json_str = base64.b64decode(b64_str).decode('utf-8')
+            config = json.loads(json_str)
+            
+            net = str(config.get("net", "")).lower()
+            tls = str(config.get("tls", "")).lower()
+            port = str(config.get("port", ""))
+            
+            if net != "ws" or tls != "tls" or port != "443":
+                return None
+                
+            host = config.get("host", "").lower()
+            sni = config.get("sni", host).lower()
+            path = config.get("path", "/")
+            
+            return {
+                "protocol": "vmess",
+                "server": config.get("add"),
+                "port": 443,
+                "id": config.get("id"),
+                "host": host,
+                "sni": sni,
+                "path": path,
+                "original": line,
+            }
+        except Exception:
+            return None
+
+    # ==========================================
+    # 2. معالجة VLESS و Trojan
+    # ==========================================
     if not (line.startswith("vless://") or line.startswith("trojan://")):
         return None
 
     try:
         parsed = urlparse(line)
         protocol = parsed.scheme.lower()
-        if protocol not in ("vless", "trojan"):
-            return None
-
         host = parsed.hostname
         port = parsed.port
 
-        # FIX: handle case where port is not present in URL
         if not host or port is None or port != 443:
             return None
 
@@ -85,17 +106,13 @@ def parse_config(line):
         if network != "ws" or security != "tls":
             return None
 
-        if not path:
-            path = "/"
-        if not ws_host:
-            ws_host = host
-        if not sni:
-            sni = ws_host
+        if not path: path = "/"
+        if not ws_host: ws_host = host
+        if not sni: sni = ws_host
 
         if protocol == "vless":
             uuid = parsed.username
-            if not uuid:
-                return None
+            if not uuid: return None
             return {
                 "protocol": "vless",
                 "server": host,
@@ -109,8 +126,7 @@ def parse_config(line):
 
         if protocol == "trojan":
             password = parsed.username
-            if not password:
-                return None
+            if not password: return None
             return {
                 "protocol": "trojan",
                 "server": host,
@@ -150,18 +166,13 @@ def make_xray_config(config, local_port):
                     {
                         "address": config["server"],
                         "port": 443,
-                        "users": [
-                            {
-                                "id": config["uuid"],
-                                "encryption": "none",
-                            }
-                        ],
+                        "users": [{"id": config["uuid"], "encryption": "none"}],
                     }
                 ]
             },
             "streamSettings": stream_settings,
         }
-    else:  # trojan
+    elif config["protocol"] == "trojan":
         outbound = {
             "protocol": "trojan",
             "settings": {
@@ -175,6 +186,31 @@ def make_xray_config(config, local_port):
             },
             "streamSettings": stream_settings,
         }
+    # ==========================================
+    # 3. إضافة VMess لـ Xray
+    # ==========================================
+    elif config["protocol"] == "vmess":
+        outbound = {
+            "protocol": "vmess",
+            "settings": {
+                "vnext": [
+                    {
+                        "address": config["server"],
+                        "port": 443,
+                        "users": [
+                            {
+                                "id": config["id"],
+                                "alterId": 0,
+                                "security": "auto"
+                            }
+                        ],
+                    }
+                ]
+            },
+            "streamSettings": stream_settings,
+        }
+    else:
+        return None
 
     return {
         "log": {"loglevel": "error"},
@@ -215,6 +251,8 @@ def test_config(index, config):
 
     try:
         xray_config = make_xray_config(config, local_port)
+        if not xray_config:
+            return {"index": index, "ok": False, "line": config["original"], "latency": None, "latencies": latencies, "protocol": config.get("protocol", "?"), "server": config.get("server", "?")}
 
         with tempfile.NamedTemporaryFile(
             mode="w", suffix=".json", delete=False, encoding="utf-8"
@@ -228,11 +266,9 @@ def test_config(index, config):
             stderr=subprocess.DEVNULL,
         )
 
-        # Wait for proxy to start
         started = False
         for _ in range(10):
-            if process.poll() is not None:
-                break
+            if process.poll() is not None: break
             try:
                 sock = socket.create_connection(("127.0.0.1", local_port), timeout=0.2)
                 sock.close()
@@ -243,15 +279,7 @@ def test_config(index, config):
 
         if not started:
             print(f"[FAILED] {config['protocol']} | {config['server']} | Xray did not start")
-            return {
-                "index": index,
-                "ok": False,
-                "line": config["original"],
-                "latency": None,
-                "latencies": latencies,
-                "protocol": config.get("protocol", "?"),
-                "server": config.get("server", "?"),
-            }
+            return {"index": index, "ok": False, "line": config["original"], "latency": None, "latencies": latencies, "protocol": config.get("protocol", "?"), "server": config.get("server", "?")}
 
         proxies = {
             "http": f"http://127.0.0.1:{local_port}",
@@ -268,39 +296,15 @@ def test_config(index, config):
         success_count = len(latencies)
         if success_count < MIN_SUCCESS:
             print(f"[FAILED] {config['protocol']} | {config['server']} | {success_count}/{TEST_ROUNDS} successful")
-            return {
-                "index": index,
-                "ok": False,
-                "line": config["original"],
-                "latency": None,
-                "latencies": latencies,
-                "protocol": config["protocol"],
-                "server": config["server"],
-            }
+            return {"index": index, "ok": False, "line": config["original"], "latency": None, "latencies": latencies, "protocol": config["protocol"], "server": config["server"]}
 
         final_latency = int(median(latencies))
         print(f"[ONLINE] {final_latency} ms | {latencies} | {config['protocol']} | {config['server']}")
-        return {
-            "index": index,
-            "ok": True,
-            "line": config["original"],
-            "latency": final_latency,
-            "latencies": latencies,
-            "protocol": config["protocol"],
-            "server": config["server"],
-        }
+        return {"index": index, "ok": True, "line": config["original"], "latency": final_latency, "latencies": latencies, "protocol": config["protocol"], "server": config["server"]}
 
     except Exception as error:
         print(f"[FAILED] {config.get('protocol', '?')} | {config.get('server', '?')} | {str(error)[:100]}")
-        return {
-            "index": index,
-            "ok": False,
-            "line": config["original"],
-            "latency": None,
-            "latencies": latencies,
-            "protocol": config.get("protocol", "?"),
-            "server": config.get("server", "?"),
-        }
+        return {"index": index, "ok": False, "line": config["original"], "latency": None, "latencies": latencies, "protocol": config.get("protocol", "?"), "server": config.get("server", "?")}
 
     finally:
         if process:
@@ -321,11 +325,10 @@ def test_config(index, config):
 
 def main():
     print("\n==============================")
-    print(" VLESS / TROJAN CHECKER")
+    print(" VLESS / TROJAN / VMESS CHECKER")
     print(" FASTEST CONFIG SORTING")
     print("==============================\n")
 
-    # Check if Xray binary exists
     if not os.path.isfile(XRAY):
         print(f"ERROR: Xray binary not found at '{XRAY}'")
         return
@@ -334,7 +337,6 @@ def main():
     lines = download_configs()
     print(f"Downloaded: {len(lines)} lines")
 
-    # Parse configs
     configs = []
     for line in lines:
         config = parse_config(line)
@@ -346,11 +348,10 @@ def main():
     print(f"Minimum successful tests: {MIN_SUCCESS}")
 
     if not configs:
-        print("\nNo VLESS/Trojan WS TLS 443 configs found.")
+        print("\nNo VLESS/Trojan/VMess WS TLS 443 configs found.")
         open("working.txt", "w", encoding="utf-8").close()
         return
 
-    # Prepare tasks for threading
     tasks = list(enumerate(configs, start=1))
     results = []
 
@@ -358,14 +359,12 @@ def main():
         iterator = iter(tasks)
         pending = set()
 
-        # Fill the pool initially
         for _ in range(MAX_WORKERS):
             try:
                 pending.add(executor.submit(test_config, *next(iterator)))
             except StopIteration:
                 break
 
-        # Process completed tasks and keep pool full
         while pending:
             done, pending = concurrent.futures.wait(
                 pending,
@@ -378,22 +377,18 @@ def main():
                 except Exception as e:
                     print(f"[FAILED] Worker error: {str(e)[:100]}")
 
-                # Submit a new task if any remain
                 try:
                     pending.add(executor.submit(test_config, *next(iterator)))
                 except StopIteration:
                     pass
 
-    # Filter working results
     working_results = [r for r in results if r["ok"]]
     working_results.sort(key=lambda x: (x["latency"], x["index"]))
 
-    # Write output
     with open("working.txt", "w", encoding="utf-8") as f:
         for r in working_results:
             f.write(r["line"] + "\n")
 
-    # Statistics
     working_count = len(working_results)
     failed_count = len(configs) - working_count
 
