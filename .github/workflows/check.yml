@@ -5,7 +5,7 @@ on:
 
   schedule:
   # كل يومين - UTC
-  - cron: "0 0 */2 * *"
+  - cron: "0 */6 * * *"
 
 permissions:
   contents: write
