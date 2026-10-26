@@ -4,8 +4,8 @@ on:
   workflow_dispatch:
 
   schedule:
-  # كل يومين - UTC
-  - cron: "0 */6 * * *"
+    # كل 6 سوايع - UTC
+    - cron: "0 */6 * * *"
 
 permissions:
   contents: write
@@ -22,7 +22,7 @@ jobs:
       # ==========================================
 
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
 
 
       # ==========================================
@@ -30,7 +30,7 @@ jobs:
       # ==========================================
 
       - name: Setup Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v7
         with:
           python-version: "3.12"
 
@@ -140,7 +140,7 @@ jobs:
       # ==========================================
 
       - name: Upload working configs
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v6
         with:
           name: working-configs
           path: working_configs.txt
