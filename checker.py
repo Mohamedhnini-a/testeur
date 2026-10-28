@@ -31,7 +31,7 @@ MAX_WORKERS = 20
 BASE_PORT = 20000
 TEST_ROUNDS = 1
 MIN_SUCCESS = 1
-
+MAX_LATENCY_MS = 10000
 # ============ HTTP Session (thread-safe, يتجاهل env proxies) ============
 _SESSION = requests.Session()
 _SESSION.trust_env = False
