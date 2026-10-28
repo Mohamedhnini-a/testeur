@@ -20,9 +20,7 @@ SOURCE_URLS = [
 XRAY = "./xray/xray"
 
 # ============ TEST_URL ============
-# خيار 1 (المستعمل دابا): gstatic — خفيف و موثوق
 TEST_URL = "http://www.gstatic.com/generate_204"
-# خيار 2 (بديل): Cloudflare — محايد أكثر
 # TEST_URL = "http://cp.cloudflare.com/"
 
 TIMEOUT = 15
@@ -50,7 +48,7 @@ def download_configs():
 
 def parse_config(line):
     # ==========================================
-    # 1. معالجة VMess (بعد الإصلاح)
+    # 1. VMess
     # ==========================================
     if line.startswith("vmess://"):
         try:
@@ -66,24 +64,20 @@ def parse_config(line):
             if net != "ws" or tls != "tls" or port != "443":
                 return None
 
-            # ✅ validation ديال id و add
             vm_id = config.get("id")
             server = config.get("add")
             if not vm_id or not server:
                 return None
 
-            # ✅ fallback: sni -> host -> server
             host = (config.get("host") or server).lower()
             sni = (config.get("sni") or host or server).lower()
             path = config.get("path") or "/"
 
-            # ✅ alterId من config (كان ثابت على 0)
             try:
                 aid = int(config.get("aid") or 0)
             except (ValueError, TypeError):
                 aid = 0
 
-            # ✅ cipher من config (كان ثابت على "auto")
             scy = config.get("scy") or config.get("security") or "auto"
 
             return {
@@ -102,7 +96,7 @@ def parse_config(line):
             return None
 
     # ==========================================
-    # 2. معالجة VLESS و Trojan
+    # 2. VLESS / Trojan
     # ==========================================
     if not (line.startswith("vless://") or line.startswith("trojan://")):
         return None
@@ -126,7 +120,7 @@ def parse_config(line):
         security = get("security")
         ws_host = get("host")
         sni = get("sni")
-        path = unquote(get("path"))
+        path = get("path")
 
         if network != "ws" or security != "tls":
             return None
@@ -179,8 +173,7 @@ def make_xray_config(config, local_port):
         "security": "tls",
         "tlsSettings": {
             "serverName": config["sni"],
-            # ✅ تبدلت من False لـ True باش self-signed يقبل
-            "allowInsecure": True,
+            # ⚠️ allowInsecure محيد نهائياً - ماشي مدعوم فـ Xray v26
         },
         "wsSettings": {
             "path": config["path"],
@@ -216,9 +209,6 @@ def make_xray_config(config, local_port):
             },
             "streamSettings": stream_settings,
         }
-    # ==========================================
-    # 3. VMess (بعد الإصلاح)
-    # ==========================================
     elif config["protocol"] == "vmess":
         outbound = {
             "protocol": "vmess",
@@ -230,9 +220,7 @@ def make_xray_config(config, local_port):
                         "users": [
                             {
                                 "id": config["id"],
-                                # ✅ من config بدل ما كان ثابت على 0
                                 "alterId": config["aid"],
-                                # ✅ من config بدل ما كان ثابت على "auto"
                                 "security": config["scy"],
                             }
                         ],
@@ -258,6 +246,27 @@ def make_xray_config(config, local_port):
     }
 
 
+def validate_xray_config(config_file):
+    """كيشغل xray -test باش يتحقق من config قبل التشغيل.
+    كيرجع (is_valid, error_msg)."""
+    try:
+        result = subprocess.run(
+            [XRAY, "run", "-test", "-c", config_file],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if result.returncode != 0:
+            msg = (result.stderr or result.stdout or "").strip()
+            lines = [ln for ln in msg.splitlines() if ln.strip()]
+            return False, " | ".join(lines[-2:])[:250]
+        return True, None
+    except subprocess.TimeoutExpired:
+        return False, "xray_test_timeout"
+    except Exception as e:
+        return False, f"{type(e).__name__}: {str(e)[:150]}"
+
+
 def test_once(proxies):
     """كيرجع (latency_ms, error_reason)"""
     try:
@@ -267,7 +276,7 @@ def test_once(proxies):
             proxies=proxies,
             timeout=TIMEOUT,
             allow_redirects=False,
-            trust_env=False,  # ✅ باش NO_PROXY ما يتدخلش
+            trust_env=False,
         )
         elapsed = (time.perf_counter() - start) * 1000
         if response.status_code in (200, 204):
@@ -322,7 +331,14 @@ def test_config(index, config):
             json.dump(xray_config, f, ensure_ascii=False)
             config_file = f.name
 
-        # نكتب stderr ديال xray فـ ملف باش نقدرو نقراوه إلا مات
+        # ============ VALIDATION (جديد) ============
+        is_valid, err = validate_xray_config(config_file)
+        if not is_valid:
+            print(f"[FAILED:invalid_config] {config.get('protocol','?')} | {config.get('server','?')} | {err}")
+            return {**base_result, "ok": False, "latency": None,
+                    "latencies": [], "reason": f"invalid_config: {err[:120]}"}
+
+        # ============ تشغيل Xray ============
         log_file = tempfile.NamedTemporaryFile(suffix=".log", delete=False).name
         log_handle = open(log_file, "w")
         try:
@@ -334,9 +350,8 @@ def test_config(index, config):
         finally:
             log_handle.close()
 
-        # نتسناو Xray يفتح البورت
         started = False
-        for _ in range(10):
+        for _ in range(20):  # 2s
             if process.poll() is not None:
                 break
             try:
@@ -348,11 +363,14 @@ def test_config(index, config):
                 time.sleep(0.1)
 
         if not started:
-            # ✅ نعرفو بالضبط: مات ولا غير ما فتحش البورت
-            reason = "xray_died" if process.poll() is not None else "xray_no_port"
+            exit_code = process.poll()
+            time.sleep(0.2)
             xray_err = _read_log(log_file)
-            print(f"[FAILED:{reason}] {config.get('protocol','?')} | {config.get('server','?')} | {xray_err}")
-            return {**base_result, "ok": False, "latency": None, "latencies": [], "reason": reason}
+            detail = f"exit={exit_code}|err={xray_err or 'empty'}"
+            reason = "xray_died" if exit_code is not None else "xray_no_port"
+            print(f"[FAILED:{reason}] {config.get('protocol','?')} | {config.get('server','?')} | {detail}")
+            return {**base_result, "ok": False, "latency": None,
+                    "latencies": [], "reason": f"{reason}({detail})"}
 
         proxies = {
             "http": f"http://127.0.0.1:{local_port}",
@@ -372,16 +390,19 @@ def test_config(index, config):
         if success_count < MIN_SUCCESS:
             reason = last_err or "request_failed"
             print(f"[FAILED:{reason}] {config.get('protocol','?')} | {config.get('server','?')} | {success_count}/{TEST_ROUNDS}")
-            return {**base_result, "ok": False, "latency": None, "latencies": latencies, "reason": reason}
+            return {**base_result, "ok": False, "latency": None,
+                    "latencies": latencies, "reason": reason}
 
         final_latency = int(median(latencies))
         print(f"[ONLINE] {final_latency} ms | {latencies} | {config.get('protocol','?')} | {config.get('server','?')}")
-        return {**base_result, "ok": True, "latency": final_latency, "latencies": latencies, "reason": "ok"}
+        return {**base_result, "ok": True, "latency": final_latency,
+                "latencies": latencies, "reason": "ok"}
 
     except Exception as error:
         err_type = type(error).__name__
         print(f"[FAILED:{err_type}] {config.get('protocol','?')} | {config.get('server','?')} | {str(error)[:100]}")
-        return {**base_result, "ok": False, "latency": None, "latencies": latencies, "reason": err_type}
+        return {**base_result, "ok": False, "latency": None,
+                "latencies": latencies, "reason": err_type}
 
     finally:
         if process:
@@ -412,11 +433,19 @@ def main():
         print(f"ERROR: Xray binary not found at '{XRAY}'")
         return
 
+    # ============ Xray version (جديد) ============
+    try:
+        ver = subprocess.run([XRAY, "version"], capture_output=True, text=True, timeout=5)
+        print("=== Xray version ===")
+        print(ver.stdout.strip()[:400] or ver.stderr.strip()[:400])
+        print("====================\n")
+    except Exception as e:
+        print(f"WARNING: couldn't get xray version: {e}\n")
+
     print("Downloading configs...")
     lines = download_configs()
     print(f"Downloaded: {len(lines)} lines")
 
-    # إحصائيات المرحلة 1 (parse)
     parse_stats = Counter()
     configs = []
     for line in lines:
@@ -431,10 +460,10 @@ def main():
     for key, count in parse_stats.items():
         print(f"  {key:25s}: {count}")
 
-    print(f"\nTestable configs: {len(configs)}")
-    print(f"TEST_URL        : {TEST_URL}")
+    print(f"\nTestable configs : {len(configs)}")
+    print(f"TEST_URL         : {TEST_URL}")
     print(f"Rounds per config: {TEST_ROUNDS}")
-    print(f"Min success     : {MIN_SUCCESS}")
+    print(f"Min success      : {MIN_SUCCESS}")
 
     if not configs:
         print("\nNo VLESS/Trojan/VMess WS TLS 443 configs found.")
@@ -494,7 +523,7 @@ def main():
     if failed_count:
         print("\n--- Failure reasons (overall) ---")
         overall = Counter(r.get("reason", "unknown") for r in failed_results)
-        for reason, count in overall.most_common():
+        for reason, count in overall.most_common(15):
             pct = 100 * count / failed_count
             print(f"  {count:5d} ({pct:5.1f}%)  {reason}")
 
@@ -508,15 +537,14 @@ def main():
         for proto, counter in sorted(per_proto.items()):
             total_proto = sum(counter.values())
             print(f"  [{proto}]  total failed = {total_proto}")
-            for reason, count in counter.most_common():
+            for reason, count in counter.most_common(8):
                 pct = 100 * count / total_proto
                 print(f"      {count:5d} ({pct:5.1f}%)  {reason}")
 
-        # Success rate per protocol
         print("\n--- Success rate per protocol ---")
         proto_total = Counter(r["protocol"] for r in results)
         proto_ok = Counter(r["protocol"] for r in working_results)
-        for proto in proto_total:
+        for proto in sorted(proto_total):
             ok = proto_ok.get(proto, 0)
             total = proto_total[proto]
             pct = 100 * ok / total if total else 0
