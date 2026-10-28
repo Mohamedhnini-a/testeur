@@ -19,19 +19,59 @@ SOURCE_URLS = [
 ]
 XRAY = "./xray/xray"
 
-# ============ TEST_URL ============
-TEST_URL = "http://www.gstatic.com/generate_204"
-# TEST_URL = "http://cp.cloudflare.com/"
+# ============ TEST URLs (fallback chain) ============
+TEST_URLS = [
+    "http://cp.cloudflare.com/generate_204",
+    "http://www.apple.com/library/test/success.html",
+    "http://www.gstatic.com/generate_204",
+]
 
 TIMEOUT = 15
-MAX_WORKERS = 15
+MAX_WORKERS = 20
 BASE_PORT = 20000
 TEST_ROUNDS = 1
 MIN_SUCCESS = 1
 
 # ============ HTTP Session (thread-safe, يتجاهل env proxies) ============
 _SESSION = requests.Session()
-_SESSION.trust_env = False  # ما نستعملوش HTTP_PROXY / NO_PROXY من البيئة
+_SESSION.trust_env = False
+
+
+def test_once(proxies):
+    """تحاول كل URL بالترتيب، وترجع (latency_ms, error_reason)."""
+    last_error = None
+    for url in TEST_URLS:
+        try:
+            start = time.perf_counter()
+            response = _SESSION.get(
+                url,
+                proxies=proxies,
+                timeout=TIMEOUT,
+                allow_redirects=False,
+            )
+            elapsed = (time.perf_counter() - start) * 1000
+
+            if response.status_code in (200, 204):
+                return round(elapsed), None
+
+            last_error = f"http_{response.status_code}"
+            if 500 <= response.status_code < 600:
+                continue  # جرب URL التالي
+            else:
+                return None, last_error
+
+        except requests.exceptions.Timeout:
+            last_error = "timeout"
+        except requests.exceptions.ProxyError:
+            return None, "proxy_error"
+        except requests.exceptions.SSLError:
+            last_error = "ssl_error"
+        except requests.exceptions.ConnectionError:
+            last_error = "conn_error"
+        except Exception as e:
+            last_error = type(e).__name__
+
+    return None, last_error
 
 
 def download_configs():
@@ -177,7 +217,7 @@ def make_xray_config(config, local_port):
         "security": "tls",
         "tlsSettings": {
             "serverName": config["sni"],
-            # ⚠️ allowInsecure محيد نهائياً - ماشي مدعوم فـ Xray v26
+            # ⚠️ allowInsecure محيد - ماشي مدعوم فـ Xray v26
         },
         "wsSettings": {
             "path": config["path"],
@@ -251,8 +291,7 @@ def make_xray_config(config, local_port):
 
 
 def validate_xray_config(config_file):
-    """كيشغل xray -test باش يتحقق من config قبل التشغيل.
-    كيرجع (is_valid, error_msg)."""
+    """كيشغل xray -test باش يتحقق من config قبل التشغيل."""
     try:
         result = subprocess.run(
             [XRAY, "run", "-test", "-c", config_file],
@@ -271,34 +310,7 @@ def validate_xray_config(config_file):
         return False, f"{type(e).__name__}: {str(e)[:150]}"
 
 
-def test_once(proxies):
-    """كيرجع (latency_ms, error_reason)"""
-    try:
-        start = time.perf_counter()
-        response = _SESSION.get(
-            TEST_URL,
-            proxies=proxies,
-            timeout=TIMEOUT,
-            allow_redirects=False,
-        )
-        elapsed = (time.perf_counter() - start) * 1000
-        if response.status_code in (200, 204):
-            return round(elapsed), None
-        return None, f"http_{response.status_code}"
-    except requests.exceptions.Timeout:
-        return None, "timeout"
-    except requests.exceptions.ProxyError:
-        return None, "proxy_error"
-    except requests.exceptions.SSLError:
-        return None, "ssl_error"
-    except requests.exceptions.ConnectionError:
-        return None, "conn_error"
-    except Exception as e:
-        return None, type(e).__name__
-
-
 def _read_log(log_file, max_lines=3, max_chars=250):
-    """كيقرا xray stderr باش نعرفو علاش مات"""
     try:
         with open(log_file, "r", encoding="utf-8", errors="ignore") as lf:
             lines = [ln.strip() for ln in lf.read().splitlines() if ln.strip()]
@@ -334,14 +346,12 @@ def test_config(index, config):
             json.dump(xray_config, f, ensure_ascii=False)
             config_file = f.name
 
-        # ============ VALIDATION ============
         is_valid, err = validate_xray_config(config_file)
         if not is_valid:
             print(f"[FAILED:invalid_config] {config.get('protocol','?')} | {config.get('server','?')} | {err}")
             return {**base_result, "ok": False, "latency": None,
                     "latencies": [], "reason": f"invalid_config: {err[:120]}"}
 
-        # ============ تشغيل Xray ============
         log_file = tempfile.NamedTemporaryFile(suffix=".log", delete=False).name
         log_handle = open(log_file, "w")
         try:
@@ -436,7 +446,6 @@ def main():
         print(f"ERROR: Xray binary not found at '{XRAY}'")
         return
 
-    # ============ Xray version ============
     try:
         ver = subprocess.run([XRAY, "version"], capture_output=True, text=True, timeout=5)
         print("=== Xray version ===")
@@ -464,9 +473,10 @@ def main():
         print(f"  {key:25s}: {count}")
 
     print(f"\nTestable configs : {len(configs)}")
-    print(f"TEST_URL         : {TEST_URL}")
+    print(f"TEST_URLS        : {TEST_URLS}")
     print(f"Rounds per config: {TEST_ROUNDS}")
     print(f"Min success      : {MIN_SUCCESS}")
+    print(f"Max latency (ms) : {MAX_LATENCY_MS}")
 
     if not configs:
         print("\nNo VLESS/Trojan/VMess WS TLS 443 configs found.")
@@ -507,22 +517,26 @@ def main():
     failed_results = [r for r in results if not r["ok"]]
     working_results.sort(key=lambda x: (x["latency"], x["index"]))
 
+    # فلترة الـ configs البطيئة
+    fast_results = [r for r in working_results if r["latency"] <= MAX_LATENCY_MS]
+    slow_count = len(working_results) - len(fast_results)
+
     with open("working.txt", "w", encoding="utf-8") as f:
-        for r in working_results:
+        for r in fast_results:
             f.write(r["line"] + "\n")
 
-    working_count = len(working_results)
+    working_count = len(fast_results)
     failed_count = len(failed_results)
 
     print("\n==============================")
     print(" CHECK FINISHED")
     print("==============================")
-    print(f"Total downloaded : {len(lines)}")
-    print(f"Tested           : {len(configs)}")
-    print(f"Working          : {working_count}")
-    print(f"Failed           : {failed_count}")
+    print(f"Total downloaded  : {len(lines)}")
+    print(f"Tested            : {len(configs)}")
+    print(f"Working (fast)    : {working_count}")
+    print(f"Filtered slow     : {slow_count}  (>{MAX_LATENCY_MS}ms)")
+    print(f"Failed            : {failed_count}")
 
-    # ============ DIAGNOSTIC ============
     if failed_count:
         print("\n--- Failure reasons (overall) ---")
         overall = Counter(r.get("reason", "unknown") for r in failed_results)
@@ -546,7 +560,7 @@ def main():
 
         print("\n--- Success rate per protocol ---")
         proto_total = Counter(r["protocol"] for r in results)
-        proto_ok = Counter(r["protocol"] for r in working_results)
+        proto_ok = Counter(r["protocol"] for r in fast_results)
         for proto in sorted(proto_total):
             ok = proto_ok.get(proto, 0)
             total = proto_total[proto]
@@ -554,7 +568,7 @@ def main():
             print(f"  {proto:8s}: {ok:5d}/{total:<5d}  ({pct:5.1f}%)")
 
     print("\nFastest configs:")
-    for pos, r in enumerate(working_results[:10], start=1):
+    for pos, r in enumerate(fast_results[:10], start=1):
         print(f"{pos:02d}. {r['latency']} ms | {r.get('protocol','?')} | {r.get('server','?')}")
 
     print("\nOutput: working.txt")
