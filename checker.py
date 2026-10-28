@@ -29,6 +29,10 @@ BASE_PORT = 20000
 TEST_ROUNDS = 1
 MIN_SUCCESS = 1
 
+# ============ HTTP Session (thread-safe, يتجاهل env proxies) ============
+_SESSION = requests.Session()
+_SESSION.trust_env = False  # ما نستعملوش HTTP_PROXY / NO_PROXY من البيئة
+
 
 def download_configs():
     configs = []
@@ -271,12 +275,11 @@ def test_once(proxies):
     """كيرجع (latency_ms, error_reason)"""
     try:
         start = time.perf_counter()
-        response = requests.get(
+        response = _SESSION.get(
             TEST_URL,
             proxies=proxies,
             timeout=TIMEOUT,
             allow_redirects=False,
-            trust_env=False,
         )
         elapsed = (time.perf_counter() - start) * 1000
         if response.status_code in (200, 204):
@@ -331,7 +334,7 @@ def test_config(index, config):
             json.dump(xray_config, f, ensure_ascii=False)
             config_file = f.name
 
-        # ============ VALIDATION (جديد) ============
+        # ============ VALIDATION ============
         is_valid, err = validate_xray_config(config_file)
         if not is_valid:
             print(f"[FAILED:invalid_config] {config.get('protocol','?')} | {config.get('server','?')} | {err}")
@@ -351,7 +354,7 @@ def test_config(index, config):
             log_handle.close()
 
         started = False
-        for _ in range(20):  # 2s
+        for _ in range(20):
             if process.poll() is not None:
                 break
             try:
@@ -433,7 +436,7 @@ def main():
         print(f"ERROR: Xray binary not found at '{XRAY}'")
         return
 
-    # ============ Xray version (جديد) ============
+    # ============ Xray version ============
     try:
         ver = subprocess.run([XRAY, "version"], capture_output=True, text=True, timeout=5)
         print("=== Xray version ===")
