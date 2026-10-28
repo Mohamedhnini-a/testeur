@@ -223,7 +223,7 @@ def make_xray_config(config, local_port):
         },
         "wsSettings": {
             "path": config["path"],
-            "headers": {"Host": config["host"]},
+            "host": config["host"],
         },
     }
 
