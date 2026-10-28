@@ -27,8 +27,8 @@ TEST_URLS = [
     "http://www.gstatic.com/generate_204",
 ]
 
-TIMEOUT = 15
-MAX_WORKERS = 20
+TIMEOUT = 10
+MAX_WORKERS = 40
 BASE_PORT = 20000
 TEST_ROUNDS = 1
 MIN_SUCCESS = 1
