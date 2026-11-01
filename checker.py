@@ -11,8 +11,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 import requests
 
 SOURCE_URLS = [
-    "https://github.com/iboxz/free-v2ray-collector/raw/refs/heads/main/main/mix",
-    "https://github.com/flaafix/AetrisVPN-black-list/raw/refs/heads/main/configs.txt",
+    
     "https://github.com/Mohamedhnini-a/Neverstops/raw/refs/heads/main/sub.txt",
     "https://github.com/Mohamedhnini-a/testeur/raw/refs/heads/main/working_configs.txt",
 ]
