@@ -7,6 +7,7 @@ import tempfile
 import time
 import base64
 import threading
+import random
 from urllib.parse import parse_qs, unquote, urlparse
 import requests
 
@@ -19,11 +20,12 @@ XRAY = "./xray/xray"
 
 TEST_URLS = [
     "https://www.youtube.com/generate_204",
-    "http://www.gstatic.com/generate_204",
+    "https://connectivitycheck.gstatic.com/generate_204",
+    "https://cp.cloudflare.com/generate_204",
 ]
 
-TIMEOUT = 5
-MAX_WORKERS = 15 # نقصناها لـ 15 باش ما يتخنقش السيرفر
+TIMEOUT = 15
+MAX_WORKERS = 50 # ✅ زدنا العدد باش يمشي أسرع
 BASE_PORT = 20000
 MAX_LATENCY_MS = 5000
 
@@ -102,19 +104,33 @@ def make_xray_config(config, local_port):
     stream_settings = {"network": config.get("net", "tcp"), "security": config.get("security", config.get("tls") or "none")}
     
     if stream_settings["security"] == "tls":
-        stream_settings["tlsSettings"] = {"serverName": config.get("sni") or config.get("server"), "allowInsecure": False}
-        if config.get("alpn"): stream_settings["tlsSettings"]["alpn"] = config["alpn"].split(",")
-        if config.get("fp"): stream_settings["tlsSettings"]["fingerprint"] = config["fp"]
+        stream_settings["tlsSettings"] = {
+            "serverName": config.get("sni") or config.get("server"), 
+            "allowInsecure": False,
+            "fingerprint": config.get("fp") or "chrome" # ✅ فرض بصمة chrome إلا ما كانتش
+        }
+        if config.get("alpn"): 
+            stream_settings["tlsSettings"]["alpn"] = config["alpn"].split(",")
             
     elif stream_settings["security"] == "reality":
         stream_settings["realitySettings"] = {
-            "serverName": config.get("sni") or config.get("server"), "fingerprint": config.get("fp") or "chrome",
+            "serverName": config.get("sni") or config.get("server"), 
+            "fingerprint": config.get("fp") or "chrome",
             "publicKey": config.get("pbk"), "shortId": config.get("sid"), "spiderX": config.get("spx"),
         }
 
     net = config.get("net", "tcp")
     if net == "ws":
-        stream_settings["wsSettings"] = {"path": config.get("path", "/"), "host": config.get("host") or config.get("sni")}
+        stream_settings["wsSettings"] = {
+            "path": config.get("path", "/"), 
+            "host": config.get("host") or config.get("sni"),
+            "heartbeatPeriod": 10 # ✅ إضافة heartbeat باش يبقى الاتصال ثابت
+        }
+        # ✅ إجبار ALPN على http/1.1 فـ حال WebSocket + TLS
+        if stream_settings["security"] == "tls":
+            if "tlsSettings" not in stream_settings: stream_settings["tlsSettings"] = {}
+            stream_settings["tlsSettings"]["alpn"] = ["http/1.1"]
+            
     elif net == "grpc":
         stream_settings["grpcSettings"] = {"serviceName": config.get("path")}
 
@@ -131,7 +147,8 @@ def make_xray_config(config, local_port):
     return {"log": {"loglevel": "error"}, "inbounds": [{"listen": "127.0.0.1", "port": local_port, "protocol": "http", "settings": {}}], "outbounds": [outbound]}
 
 def test_config(index, config):
-    local_port = BASE_PORT + (index % 40000)
+    # ✅ إدارة منافذ عشوائية باش نتفاداو التعارض بين الثريدات
+    local_port = random.randint(20000, 60000)
     config_file, log_file, process = None, None, None
     
     try:
@@ -156,7 +173,12 @@ def test_config(index, config):
             except OSError: time.sleep(0.1)
 
         if not started: 
-            return {"ok": False, "reason": "xray_died"}
+            # ✅ قراءة اللوغ باش نعرفو علاش طاح
+            err_details = "unknown"
+            if os.path.exists(log_file):
+                with open(log_file, "r") as lf:
+                    err_details = lf.read().strip().split('\n')[-1][:100] 
+            return {"ok": False, "reason": f"xray_died: {err_details}"}
 
         proxies = {"http": f"http://127.0.0.1:{local_port}", "https": f"http://127.0.0.1:{local_port}"}
         latency, err = test_once(proxies)
@@ -208,15 +230,12 @@ def main():
                     if res.get("ok"):
                         working_count += 1
                         results.append(res)
-                        # ✅ طباعة كل كونفيغ خدام دغيا
                         print(f"[ONLINE] {res['latency']}ms | {res['server']}", flush=True)
                     else:
-                        # (اختياري) تقدر تحيد هاد السطر إلا بغيتي اللوغ يكون نقي)
                         print(f"[FAILED] {res.get('server')} | {res.get('reason')}", flush=True)
                 except Exception as e: 
                     pass
                 
-                # ✅ طباعة التقدم كل 10 كونفيغات
                 if completed % 10 == 0 or completed == total:
                     print(f"--- [Progress] {completed}/{total} | Working: {working_count} | Remaining: {total - completed} ---", flush=True)
 
