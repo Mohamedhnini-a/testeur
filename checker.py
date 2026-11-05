@@ -18,7 +18,7 @@ SOURCE_URLS = [
 XRAY = "./xray/xray"
 
 TEST_URLS = [
-    "http://cp.cloudflare.com/generate_204",
+    "https://www.youtube.com/generate_204",
     "http://www.gstatic.com/generate_204",
 ]
 
