@@ -61,12 +61,19 @@ def download_configs():
     configs = []
     for source_url in SOURCE_URLS:
         try:
-            print(f"Downloading: {source_url}", flush=True)
-            response = requests.get(source_url, timeout=20)
-            response.raise_for_status()
-            configs.extend([line.strip() for line in response.text.splitlines() if line.strip()])
+            # يلا كان رابط http أو https
+            if source_url.startswith("http://") or source_url.startswith("https://"):
+                print(f"Downloading: {source_url}", flush=True)
+                response = requests.get(source_url, timeout=20)
+                response.raise_for_status()
+                configs.extend([line.strip() for line in response.text.splitlines() if line.strip()])
+            # يلا كان ملف محلي (بحال sub.txt)
+            else:
+                print(f"Reading local file: {source_url}", flush=True)
+                with open(source_url, "r", encoding="utf-8") as f:
+                    configs.extend([line.strip() for line in f.readlines() if line.strip()])
         except Exception as e:
-            print(f"FAILED: {e}", flush=True)
+            print(f"FAILED to load {source_url}: {e}", flush=True)
     return list(dict.fromkeys(configs))
 
 def parse_config(line):
