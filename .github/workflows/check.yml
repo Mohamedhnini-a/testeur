@@ -17,30 +17,44 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4 # ✅ إصدار صحيح
+        uses: actions/checkout@v4
 
       - name: Setup Python
-        uses: actions/setup-python@v5 # ✅ إصدار صحيح
+        uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
-      - name: Install dependencies
+      # 1. تنصيب Node.js باش نقدرو نشغلو generate.js
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
           pip install requests
 
+      # 2. تشغيل generate.js (غادي يخدم ويسالي ويكتب sub.txt)
+      - name: Run generate.js
+        run: |
+          node generate.js
+          echo "=== تأكدنا بلي sub.txt تخلق ==="
+          ls -lh sub.txt
+          wc -l sub.txt
+
+      # 3. تحميل Xray (بحال ما كان)
       - name: Download Xray
         run: |
-          # ملاحظة: الإصدار v26.7.28 مشكوك فيه. هادا إصدار معروف ومستقر:
           XRAY_VERSION="v1.8.24"
           wget -q "https://github.com/XTLS/Xray-core/releases/download/${XRAY_VERSION}/Xray-linux-64.zip" -O xray.zip
           unzip -q xray.zip -d xray
           chmod +x xray/xray
           ./xray/xray version
 
+      # 4. تشغيل checker.py (غادي يبدا من بعد ما يسالي generate.js)
       - name: Check configs
         run: |
-          # ✅ زدنا -u باش تشوف اللوغات دغيا
           python -u checker.py
 
       - name: Prepare working_configs.txt
@@ -62,20 +76,21 @@ jobs:
           echo "First configs:"
           head -n 10 working_configs.txt
 
+      # هادي مهمة باش يترفع sub.txt مع working_configs.txt
       - name: Update repository
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add working_configs.txt
+          git add working_configs.txt sub.txt
           if git diff --cached --quiet; then
-            echo "No changes in working_configs.txt"
+            echo "No changes to commit"
           else
-            git commit -m "Update working configs"
+            git commit -m "Update working configs and sub.txt"
             git push
           fi
 
       - name: Upload working configs
-        uses: actions/upload-artifact@v4 # ✅ إصدار صحيح
+        uses: actions/upload-artifact@v4
         with:
           name: working-configs
           path: working_configs.txt
