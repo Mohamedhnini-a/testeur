@@ -3,6 +3,12 @@ const fs = require('fs/promises');
 // الليستة ديال الروابط ديالك
 const sourceUrls = [
     "https://github.com/whoahaow/rjsxrd/raw/refs/heads/main/githubmirror/bypass/bypass-all.txt",
+    "https://github.com/0xRadikal/Free-v2ray-Configs/raw/refs/heads/main/all/configs.txt",
+    "https://github.com/TelegaVPN/free-vpn-keys/raw/refs/heads/main/sub/v2raytun/all.txt",
+    "https://github.com/lanzm/MetaFetch/raw/refs/heads/master/list.txt",
+    "https://github.com/10Dream/sub-mod/raw/refs/heads/main/sub/split/ws.txt",
+    "https://github.com/mehrab-shafae/V2rayCollects/raw/refs/heads/master/sub/sub_merge.txt",
+    
     "https://github.com/Mohamedhnini-a/testeur/raw/refs/heads/main/working_configs.txt",
     "https://github.com/Z-ikko/ZikkO-Vpn-configs/raw/refs/heads/main/sub/all.txt",
     "https://github.com/morpheusadam/v2ray-config/raw/refs/heads/main/subs/bundles/vmess.txt",
